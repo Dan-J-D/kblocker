@@ -1,0 +1,921 @@
+#!/bin/bash
+
+set -e
+
+SYSFS_BASE="/sys/kernel/ytblock"
+MODULE="ytblock"
+PGP_KEY_DIR="/etc/ytblock/keys"
+PGP_ENC_DIR="/var/lib/ytblock/unlock-pgp"
+STATE_FILE="/var/lib/ytblock/state"
+BLOCKED_DOMAINS_FILE="/etc/ytblock/domains.conf"
+HOSTS_MARKER="# ytblock managed entries - do not edit manually"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+usage() {
+    cat <<EOF
+ytblockctl - ytblock control tool
+
+Usage:
+  ytblockctl enable [minutes] [--insecure]
+      Enable blocking. Default: 60 minutes.
+      Requires registered PGP keys unless --insecure is set.
+
+  ytblockctl disable
+      Disable blocking. Module stays loaded.
+
+  ytblockctl block <domain> [<domain>...]
+      Configure domains to block (does NOT enable).
+
+  ytblockctl unblock [--key <hex>]
+      Remove module (needs key via PGP decrypt or --key).
+
+  ytblockctl add <domain>
+      Add a domain to the block list.
+
+  ytblockctl remove <domain>
+      Remove a domain from the block list.
+
+  ytblockctl status
+      Show current status.
+
+  ytblockctl reload
+      Re-write all configured domains to kernel module.
+
+  ytblockctl block-ip <ip> [<ip>...]
+      Manually set blocked IPs (replaces existing list).
+
+  ytblockctl list
+      Show blocked IPs and configured domains.
+
+  ytblockctl key
+      Show unload key and PGP key fingerprints.
+
+  ytblockctl add-pgp <pubkey.asc>
+      Register a PGP public key for unlock encryption.
+
+  ytblockctl remove-pgp <fingerprint>
+      Remove a registered PGP key.
+
+  ytblockctl list-pgp
+      List registered PGP keys.
+
+  ytblockctl crash
+      Trigger kernel panic (for emergency willpower).
+
+EOF
+    exit 0
+}
+
+requires_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "Error: this command requires root." >&2
+        exit 1
+    fi
+}
+
+module_loaded() {
+    [[ -d "$SYSFS_BASE" ]]
+}
+
+require_module() {
+    if ! module_loaded; then
+        echo "Error: ytblock module not loaded." >&2
+        echo "Run 'sudo modprobe $MODULE' or 'sudo make install' first." >&2
+        exit 1
+    fi
+}
+
+resolve_to_ips() {
+    local domain="$1"
+    local ips=()
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            ips+=("$line")
+        fi
+    done < <(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u)
+    echo "${ips[@]}"
+}
+
+update_hosts() {
+    local domains=("$@")
+    local hosts_file="/etc/hosts"
+    local tmp_file=$(mktemp)
+
+    cp "$hosts_file" "$tmp_file"
+
+    if grep -q "$HOSTS_MARKER" "$tmp_file"; then
+        sed -i "/$HOSTS_MARKER/,/^$/d" "$tmp_file"
+    fi
+
+    echo "" >> "$tmp_file"
+    echo "$HOSTS_MARKER" >> "$tmp_file"
+    for domain in "${domains[@]}"; do
+        echo "0.0.0.0 $domain" >> "$tmp_file"
+        echo "0.0.0.0 www.$domain" >> "$tmp_file"
+    done
+    echo "" >> "$tmp_file"
+
+    chmod 644 "$tmp_file"
+    cp "$tmp_file" "$hosts_file"
+
+    if command -v chattr &>/dev/null; then
+        chattr +i "$hosts_file" 2>/dev/null || true
+    fi
+
+    rm -f "$tmp_file"
+}
+
+clear_hosts() {
+    local hosts_file="/etc/hosts"
+    local tmp_file=$(mktemp)
+
+    if command -v chattr &>/dev/null; then
+        chattr -i "$hosts_file" 2>/dev/null || true
+    fi
+
+    cp "$hosts_file" "$tmp_file"
+
+    if grep -q "$HOSTS_MARKER" "$tmp_file"; then
+        sed -i "/$HOSTS_MARKER/,/^$/d" "$tmp_file"
+        cp "$tmp_file" "$hosts_file"
+        echo "Cleared ytblock entries from /etc/hosts"
+    fi
+
+    rm -f "$tmp_file"
+}
+
+write_ips_to_sysfs() {
+    local ips=("$@")
+    local tmp_file=$(mktemp)
+    for ip in "${ips[@]}"; do
+        echo "$ip" >> "$tmp_file"
+    done
+    cat "$tmp_file" > "$SYSFS_BASE/blocked_ips" 2>/dev/null || true
+    rm -f "$tmp_file"
+}
+
+write_domains_to_sysfs() {
+    local domains=("$@")
+    local tmp_file=$(mktemp)
+    for domain in "${domains[@]}"; do
+        echo "$domain" >> "$tmp_file"
+    done
+    cat "$tmp_file" > "$SYSFS_BASE/blocked_domains" 2>/dev/null || true
+    rm -f "$tmp_file"
+}
+
+read_configured_domains() {
+    if [[ -f "$BLOCKED_DOMAINS_FILE" ]]; then
+        grep -v '^#' "$BLOCKED_DOMAINS_FILE" | grep -v '^$' || true
+    fi
+}
+
+save_domains() {
+    local domains=("$@")
+    mkdir -p /etc/ytblock
+    if command -v chattr &>/dev/null; then
+        chattr -i /etc/ytblock/domains.conf 2>/dev/null || true
+    fi
+    printf '%s\n' "${domains[@]}" > "$BLOCKED_DOMAINS_FILE"
+    chmod 644 "$BLOCKED_DOMAINS_FILE"
+    if command -v chattr &>/dev/null; then
+        chattr +i "$BLOCKED_DOMAINS_FILE" 2>/dev/null || true
+    fi
+}
+
+# --- Key management ---
+
+read_key_from_sysfs() {
+    cat "$SYSFS_BASE/key" 2>/dev/null || true
+}
+
+pgp_key_fingerprints() {
+    local dir="$1"
+    if [[ ! -d "$dir" ]]; then
+        return
+    fi
+    for f in "$dir"/*.asc "$dir"/*.gpg "$dir"/*.pub; do
+        [[ -f "$f" ]] || continue
+        gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^fpr:' | cut -d: -f10 || true
+    done
+}
+
+pgp_encrypt_key() {
+    local hex_key="$1"
+    local key_dir="$2"
+    local out_dir="$3"
+
+    mkdir -p "$out_dir"
+
+    for f in "$key_dir"/*.asc "$key_dir"/*.gpg "$key_dir"/*.pub; do
+        [[ -f "$f" ]] || continue
+        local fp
+        fp=$(gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^fpr:' | cut -d: -f10 | head -1)
+        [[ -n "$fp" ]] || continue
+        echo -n "$hex_key" | gpg --trust-model=always --encrypt --armor \
+            --recipient-file "$f" \
+            --output "$out_dir/unlock-$fp.asc" 2>/dev/null && \
+        chmod 600 "$out_dir/unlock-$fp.asc" && \
+        echo "  Encrypted for $fp"
+    done
+}
+
+pgp_decrypt_key() {
+    local enc_dir="$1"
+    for f in "$enc_dir"/unlock-*.asc; do
+        [[ -f "$f" ]] || continue
+        local key
+        key=$(gpg --decrypt "$f" 2>/dev/null) || continue
+        if [[ -n "$key" ]]; then
+            echo "$key"
+            return 0
+        fi
+    done
+    return 1
+}
+
+pgp_count() {
+    local dir="$1"
+    if [[ ! -d "$dir" ]]; then
+        echo 0
+        return
+    fi
+    local count=0
+    for f in "$dir"/*.asc "$dir"/*.gpg "$dir"/*.pub; do
+        [[ -f "$f" ]] && ((count++))
+    done
+    echo "$count"
+}
+
+store_key_pgp() {
+    local hex_key="$1"
+    local num_pgp
+    num_pgp=$(pgp_count "$PGP_KEY_DIR")
+    if [[ "$num_pgp" -eq 0 ]]; then
+        return 1
+    fi
+    echo -e "${CYAN}Encrypting key for $num_pgp PGP recipients...${NC}"
+    pgp_encrypt_key "$hex_key" "$PGP_KEY_DIR" "$PGP_ENC_DIR"
+    echo -e "${GREEN}Key encrypted (raw key never written to disk).${NC}"
+    return 0
+}
+
+state_expiry() {
+    local minutes="$1"
+    date -u +%s 2>/dev/null | awk -v m="$minutes" '{print $1 + m * 60}'
+}
+
+store_state() {
+    local hex_key="$1"
+    local expiry="$2"
+    mkdir -p /var/lib/ytblock
+    local hash_hex
+    hash_hex=$(printf '%s' "$hex_key" | xxd -r -p | sha256sum | cut -d' ' -f1 2>/dev/null)
+    if [[ -z "$hash_hex" ]]; then
+        hash_hex=$(echo -n "$hex_key" | perl -pe 'chomp' | xxd -r -p | sha256sum | cut -d' ' -f1 2>/dev/null)
+    fi
+    if [[ -z "$hash_hex" ]]; then
+        echo -e "${YELLOW}Warning: could not compute key hash for state persistence${NC}" >&2
+        return 1
+    fi
+    echo "key_hash:$hash_hex" > "$STATE_FILE"
+    echo "expiry:$expiry" >> "$STATE_FILE"
+    chmod 600 "$STATE_FILE"
+    return 0
+}
+
+restore_state_from_file() {
+    [[ -f "$STATE_FILE" ]] || return 1
+    local hash_hex expiry
+    hash_hex=$(grep '^key_hash:' "$STATE_FILE" | cut -d: -f2)
+    expiry=$(grep '^expiry:' "$STATE_FILE" | cut -d: -f2)
+    [[ -n "$hash_hex" && -n "$expiry" ]] || return 1
+    printf '%s:%s' "$hash_hex" "$expiry" > "$SYSFS_BASE/restore" 2>/dev/null || return 1
+    return 0
+}
+
+# ---
+
+do_enable() {
+    requires_root
+    require_module
+
+    local insecure=false
+    local minutes=""
+    local args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --insecure) insecure=true; shift ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+
+    minutes="${args[0]:-60}"
+
+    if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [[ "$minutes" -eq 0 ]]; then
+        echo "Error: specify a positive number of minutes." >&2
+        exit 1
+    fi
+
+    local hex_key
+    hex_key=$(read_key_from_sysfs)
+
+    if [[ -z "$hex_key" ]]; then
+        hex_key=$(dmesg 2>/dev/null | grep "ytblock: loaded" | tail -1 | sed 's/.*key: //')
+    fi
+
+    if [[ -z "$hex_key" ]]; then
+        echo -e "${YELLOW}Warning: could not read unload key.${NC}"
+    else
+        if ! $insecure; then
+            if store_key_pgp "$hex_key"; then
+                :
+            else
+                echo -e "${RED}No PGP keys registered.${NC}"
+                echo "  Register a PGP public key first:"
+                echo "    ytblockctl add-pgp <pubkey.asc>"
+                echo ""
+                echo "  Or use --insecure to print the key to stdout"
+                echo "  (you must save it yourself):"
+                echo "    ytblockctl enable $minutes --insecure"
+                exit 1
+            fi
+        else
+            echo -e "${YELLOW}INSECURE MODE: key will not be saved to disk.${NC}"
+            echo "  Unload key: $hex_key"
+            echo "  Write this down or send it to your unlockers via PGP."
+            echo "  Without it, you will need to reboot to remove the module."
+        fi
+    fi
+
+    echo "$((minutes * 60))" > "$SYSFS_BASE/enabled" 2>/dev/null || {
+        echo -e "${RED}Failed to enable blocking${NC}" >&2
+        exit 1
+    }
+
+    if ! $insecure && [[ -n "$hex_key" ]]; then
+        local expiry
+        expiry=$(state_expiry "$minutes")
+        if store_state "$hex_key" "$expiry"; then
+            echo -e "${GREEN}State saved (survives reboot).${NC}"
+        fi
+    fi
+
+    echo -e "${GREEN}Blocking enabled for $minutes minutes.${NC}"
+}
+
+do_disable() {
+    requires_root
+    require_module
+
+    echo "0" > "$SYSFS_BASE/enabled" 2>/dev/null || true
+    clear_hosts
+    rm -f "$STATE_FILE"
+
+    echo -e "${GREEN}Blocking disabled. Module still loaded.${NC}"
+}
+
+do_block() {
+    requires_root
+    local domains=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            *) domains+=("$1"); shift ;;
+        esac
+    done
+
+    if [[ ${#domains[@]} -eq 0 ]]; then
+        echo "Error: specify at least one domain to block." >&2
+        exit 1
+    fi
+
+    require_module
+
+    echo -e "${CYAN}Writing ${#domains[@]} domains to kernel module...${NC}"
+    write_domains_to_sysfs "${domains[@]}"
+
+    echo -e "${CYAN}Updating /etc/hosts...${NC}"
+    update_hosts "${domains[@]}"
+
+    echo -e "${CYAN}Saving domain configuration...${NC}"
+    save_domains "${domains[@]}"
+
+    echo -e "${GREEN}Configured ${#domains[@]} domains. Run 'ytblockctl enable' to activate.${NC}"
+}
+
+do_unblock() {
+    requires_root
+
+    local provided_key=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --key|-k) shift; provided_key="$1"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if module_loaded; then
+        echo "0" > "$SYSFS_BASE/enabled" 2>/dev/null || true
+    fi
+
+    clear_hosts
+
+    if ! module_loaded; then
+        echo "Module not loaded. Hosts cleaned."
+        exit 0
+    fi
+
+    local key
+
+    if [[ -n "$provided_key" ]]; then
+        key="$provided_key"
+    else
+        key=$(pgp_decrypt_key "$PGP_ENC_DIR") && {
+            echo -e "${GREEN}Decrypted key via PGP${NC}"
+        }
+
+        if [[ -z "$key" ]]; then
+            echo -e "${YELLOW}Unload key not found. Checking dmesg...${NC}"
+            key=$(dmesg 2>/dev/null | grep "ytblock: loaded" | tail -1 | sed 's/.*key: //')
+            if [[ -z "$key" ]]; then
+                echo -e "${RED}Could not find unload key.${NC}" >&2
+                echo "  Provide it via --key <hex> or ensure the PGP-encrypted"
+                echo "  key is available in $PGP_ENC_DIR"
+                echo "  Or reboot to force-remove the module." >&2
+                exit 1
+            fi
+        fi
+    fi
+
+    echo -e "${CYAN}Authorizing module unload...${NC}"
+    printf '%s' "$key" > "$SYSFS_BASE/unblock" 2>/dev/null || {
+        echo -e "${RED}Failed to authorize unload. Invalid key?${NC}" >&2
+        exit 1
+    }
+
+    echo -e "${CYAN}Removing kernel module...${NC}"
+    rmmod "$MODULE" 2>/dev/null || {
+        rmmod -f "$MODULE" 2>/dev/null || true
+    }
+
+    rm -f "$STATE_FILE"
+    rm -rf "$PGP_ENC_DIR" /etc/ytblock/domains.conf
+
+    echo -e "${GREEN}Unblocked. Module removed.${NC}"
+}
+
+do_status() {
+    if ! module_loaded; then
+        echo "ytblock: NOT LOADED"
+        exit 0
+    fi
+
+    local status
+    status=$(cat "$SYSFS_BASE/status" 2>/dev/null || echo "unknown")
+
+    local enabled_state
+    enabled_state=$(echo "$status" | grep '^enabled:' | awk '{print $2}')
+    local remaining
+    remaining=$(echo "$status" | grep '^remaining:' | awk '{print $2}')
+    local count_v4
+    count_v4=$(echo "$status" | grep '^blocked_ips_v4:' | awk '{print $2}')
+    local count_v6
+    count_v6=$(echo "$status" | grep '^blocked_ips_v6:' | awk '{print $2}')
+    local domain_count
+    domain_count=$(echo "$status" | grep '^blocked_domains:' | awk '{print $2}')
+    local count=$((count_v4 + count_v6))
+
+    if [[ "$enabled_state" == "1" ]]; then
+        local mins=$((remaining / 60))
+        local secs=$((remaining % 60))
+        echo -e "${GREEN}Blocking: ACTIVE${NC}"
+        echo "  Time remaining: ${mins}m ${secs}s"
+    else
+        echo -e "${YELLOW}Blocking: DISABLED${NC}"
+        echo "  Run 'ytblockctl enable <minutes>' to activate"
+    fi
+    echo "  Blocked IPs: $count"
+    echo "  Blocked domains: $domain_count"
+
+    local protect_count
+    protect_count=$(echo "$status" | grep '^protected_files:' | awk '{print $2}')
+    echo "  Protected files: $protect_count"
+
+    local restored_state
+    restored_state=$(echo "$status" | grep '^state_restored:' | awk '{print $2}')
+    if [[ "$restored_state" == "1" ]]; then
+        echo "  State: restored from disk"
+    fi
+
+    KO_FILE="/lib/modules/$(uname -r)/extra/ytblock.ko"
+    if [[ -f "$KO_FILE" ]]; then
+        if command -v lsattr &>/dev/null; then
+            local attrs
+            attrs=$(lsattr "$KO_FILE" 2>/dev/null | awk '{print $1}')
+            if echo "$attrs" | grep -q 'i'; then
+                echo "  Module file: immutable"
+            else
+                echo "  Module file: mutable"
+            fi
+        else
+            echo "  Module file: installed"
+        fi
+    else
+        echo "  Module file: MISSING"
+    fi
+
+    MODULES_LOAD="/etc/modules-load.d/ytblock.conf"
+    if [[ -f "$MODULES_LOAD" ]]; then
+        if command -v lsattr &>/dev/null; then
+            local attrs
+            attrs=$(lsattr "$MODULES_LOAD" 2>/dev/null | awk '{print $1}')
+            if echo "$attrs" | grep -q 'i'; then
+                echo "  Auto-load: immutable (persistent)"
+            else
+                echo "  Auto-load: present"
+            fi
+        fi
+    else
+        echo "  Auto-load config: MISSING"
+    fi
+
+    if [[ -f "$BLOCKED_DOMAINS_FILE" ]]; then
+        echo "  Configured domains:"
+        while IFS= read -r domain; do
+            echo "    - $domain"
+        done < "$BLOCKED_DOMAINS_FILE"
+    fi
+
+    echo "  Key:"
+    if [[ -d "$PGP_ENC_DIR" ]] && ls "$PGP_ENC_DIR"/unlock-*.asc &>/dev/null 2>&1; then
+        echo "    Type: PGP-encrypted (in memory only)"
+        for f in "$PGP_ENC_DIR"/unlock-*.asc; do
+            local fp="${f##*/unlock-}"
+            fp="${fp%.asc}"
+            echo "    Recipient: $fp"
+        done
+    else
+        echo "    Type: in-kernel hash (read via: ytblockctl key)"
+    fi
+}
+
+do_reload() {
+    requires_root
+    require_module
+
+    local domains=($(read_configured_domains))
+    if [[ ${#domains[@]} -eq 0 ]]; then
+        echo "No configured domains found." >&2
+        exit 1
+    fi
+
+    echo -e "${CYAN}Re-writing ${#domains[@]} domains to kernel module...${NC}"
+    write_domains_to_sysfs "${domains[@]}"
+
+    # Refresh PGP ciphertexts if keys are registered (handles new key after reboot)
+    local num_pgp
+    num_pgp=$(pgp_count "$PGP_KEY_DIR")
+    if [[ "$num_pgp" -gt 0 ]]; then
+        local hex_key
+        hex_key=$(read_key_from_sysfs)
+        if [[ -n "$hex_key" ]]; then
+            echo -e "${CYAN}Refreshing PGP ciphertexts for $num_pgp keys...${NC}"
+            pgp_encrypt_key "$hex_key" "$PGP_KEY_DIR" "$PGP_ENC_DIR"
+        fi
+    fi
+
+    # Restore timer state from file (key hash + expiry) — survives reboot
+    if restore_state_from_file; then
+        echo -e "${GREEN}Blocking state restored from disk.${NC}"
+    fi
+
+    echo -e "${GREEN}Reload complete.${NC}"
+}
+
+do_add() {
+    requires_root
+    require_module
+
+    local domain="$1"
+    if [[ -z "$domain" ]]; then
+        echo "Error: specify a domain to add." >&2
+        exit 1
+    fi
+
+    local domains=($(read_configured_domains))
+    for d in "${domains[@]}"; do
+        if [[ "$d" == "$domain" ]]; then
+            echo "$domain is already configured."
+            exit 0
+        fi
+    done
+
+    domains+=("$domain")
+    save_domains "${domains[@]}"
+
+    write_domains_to_sysfs "${domains[@]}"
+
+    update_hosts "${domains[@]}"
+
+    echo "Added $domain. Run 'ytblockctl enable' to activate."
+}
+
+do_remove() {
+    requires_root
+    require_module
+
+    local domain="$1"
+    if [[ -z "$domain" ]]; then
+        echo "Error: specify a domain to remove." >&2
+        exit 1
+    fi
+
+    local domains=($(read_configured_domains))
+    local new_domains=()
+    local found=false
+    for d in "${domains[@]}"; do
+        if [[ "$d" != "$domain" ]]; then
+            new_domains+=("$d")
+        else
+            found=true
+        fi
+    done
+
+    if ! $found; then
+        echo "$domain is not in the block list."
+        exit 0
+    fi
+
+    save_domains "${new_domains[@]}"
+    update_hosts "${new_domains[@]}"
+
+    if [[ ${#new_domains[@]} -eq 0 ]]; then
+        echo "" > "$SYSFS_BASE/blocked_domains" 2>/dev/null || true
+    else
+        write_domains_to_sysfs "${new_domains[@]}"
+    fi
+
+    echo "Removed $domain."
+}
+
+do_block_ip() {
+    requires_root
+    require_module
+
+    local ips=("$@")
+    if [[ ${#ips[@]} -eq 0 ]]; then
+        echo "Error: specify at least one IP to block." >&2
+        exit 1
+    fi
+
+    local tmp_file=$(mktemp)
+    for ip in "${ips[@]}"; do
+        echo "$ip" >> "$tmp_file"
+    done
+    cat "$tmp_file" > "$SYSFS_BASE/blocked_ips" 2>/dev/null || {
+        echo -e "${RED}Failed to write IPs to kernel module${NC}" >&2
+        rm -f "$tmp_file"
+        exit 1
+    }
+    rm -f "$tmp_file"
+
+    local count
+    count=$(cat "$SYSFS_BASE/block_count" 2>/dev/null || echo "?")
+    echo -e "${GREEN}Blocked ${#ips[@]} IPs (total in kernel: $count).${NC}"
+}
+
+do_list() {
+    if ! module_loaded; then
+        echo "ytblock: NOT LOADED"
+        exit 0
+    fi
+
+    echo "=== Blocked IPs ==="
+    cat "$SYSFS_BASE/blocked_ips" 2>/dev/null || echo "(empty)"
+    echo ""
+
+    echo "=== Blocked Domains ==="
+    local domains
+    domains=$(cat "$SYSFS_BASE/blocked_domains" 2>/dev/null || echo "(empty)")
+    echo "$domains"
+    echo ""
+
+    if [[ -f "$BLOCKED_DOMAINS_FILE" ]]; then
+        echo "=== Configured Domains ==="
+        cat "$BLOCKED_DOMAINS_FILE"
+    fi
+}
+
+do_key() {
+    requires_root
+
+    local hex_key
+    hex_key=$(read_key_from_sysfs 2>/dev/null || true)
+
+    if [[ -z "$hex_key" ]]; then
+        hex_key=$(dmesg 2>/dev/null | grep "ytblock: loaded" | tail -1 | sed 's/.*key: //')
+    fi
+
+    if [[ -z "$hex_key" ]]; then
+        hex_key=$(pgp_decrypt_key "$PGP_ENC_DIR" 2>/dev/null || true)
+    fi
+
+    if [[ -n "$hex_key" ]]; then
+        echo "ytblock unload key: $hex_key"
+        echo ""
+    fi
+
+    local num_pgp
+    num_pgp=$(pgp_count "$PGP_KEY_DIR")
+    if [[ "$num_pgp" -gt 0 ]]; then
+        echo "Registered PGP keys:"
+        for fp in $(pgp_key_fingerprints "$PGP_KEY_DIR"); do
+            local enc_status="no"
+            [[ -f "$PGP_ENC_DIR/unlock-$fp.asc" ]] && enc_status="yes"
+            echo "  $fp  (encrypted: $enc_status)"
+        done
+    else
+        echo "No PGP keys registered."
+        echo "  Add with: ytblockctl add-pgp <pubkey.asc>"
+        echo "  Or use:   ytblockctl enable --insecure"
+    fi
+
+    if [[ -d "$PGP_ENC_DIR" ]]; then
+        local enc_count=0
+        for f in "$PGP_ENC_DIR"/unlock-*.asc; do
+            [[ -f "$f" ]] && ((enc_count++))
+        done
+        echo "PGP-encrypted copies: $enc_count"
+    fi
+
+    if [[ -z "$hex_key" ]]; then
+        echo "No unload key found." >&2
+        exit 1
+    fi
+}
+
+do_add_pgp() {
+    requires_root
+
+    local key_file="$1"
+    if [[ -z "$key_file" ]]; then
+        echo "Error: specify a PGP public key file." >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$key_file" ]]; then
+        echo "Error: file not found: $key_file" >&2
+        exit 1
+    fi
+
+    mkdir -p "$PGP_KEY_DIR"
+
+    local fp
+    fp=$(gpg --with-colons --show-keys "$key_file" 2>/dev/null | grep '^fpr:' | cut -d: -f10 | head -1)
+    if [[ -z "$fp" ]]; then
+        echo "Error: could not read PGP key from $key_file" >&2
+        exit 1
+    fi
+
+    local dest="$PGP_KEY_DIR/$fp.asc"
+    if [[ -f "$dest" ]]; then
+        echo "PGP key $fp already registered."
+        exit 0
+    fi
+
+    cp "$key_file" "$dest"
+    chmod 644 "$dest"
+
+    if module_loaded; then
+        local hex_key
+        hex_key=$(read_key_from_sysfs 2>/dev/null || true)
+        if [[ -z "$hex_key" ]]; then
+            hex_key=$(dmesg 2>/dev/null | grep "ytblock: loaded" | tail -1 | sed 's/.*key: //')
+        fi
+        if [[ -n "$hex_key" ]]; then
+            echo -e "${CYAN}Encrypting existing key for new recipient...${NC}"
+            mkdir -p "$PGP_ENC_DIR"
+            echo -n "$hex_key" | gpg --trust-model=always --encrypt --armor \
+                --recipient-file "$dest" \
+                --output "$PGP_ENC_DIR/unlock-$fp.asc" 2>/dev/null && \
+            chmod 600 "$PGP_ENC_DIR/unlock-$fp.asc"
+        fi
+    fi
+
+    echo -e "${GREEN}Added PGP key: $fp${NC}"
+}
+
+do_remove_pgp() {
+    requires_root
+
+    local target="$1"
+    if [[ -z "$target" ]]; then
+        echo "Error: specify a fingerprint or filename to remove." >&2
+        exit 1
+    fi
+
+    if [[ ! -d "$PGP_KEY_DIR" ]]; then
+        echo "No PGP keys registered."
+        exit 0
+    fi
+
+    local found=false
+    for f in "$PGP_KEY_DIR"/*.asc; do
+        [[ -f "$f" ]] || continue
+        local fp
+        fp=$(gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^fpr:' | cut -d: -f10 | head -1)
+        if [[ "$f" == "$PGP_KEY_DIR/$target.asc" || "$fp" == "$target" ]]; then
+            rm -f "$f" "$PGP_ENC_DIR/unlock-$fp.asc"
+            echo "Removed PGP key: $fp"
+            found=true
+            break
+        fi
+    done
+
+    if ! $found; then
+        echo "No matching PGP key found: $target"
+        exit 1
+    fi
+}
+
+do_list_pgp() {
+    requires_root
+
+    if [[ ! -d "$PGP_KEY_DIR" ]]; then
+        echo "No PGP keys registered."
+        exit 0
+    fi
+
+    local count=0
+    for f in "$PGP_KEY_DIR"/*.asc; do
+        [[ -f "$f" ]] || continue
+        local fp
+        fp=$(gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^fpr:' | cut -d: -f10 | head -1)
+        local user
+        user=$(gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^uid:' | cut -d: -f10 | head -1)
+        local enc="no"
+        [[ -f "$PGP_ENC_DIR/unlock-$fp.asc" ]] && enc="yes"
+        echo "Fingerprint: $fp"
+        echo "  User:       $user"
+        echo "  Encrypted:  $enc"
+        echo ""
+        ((count++))
+    done
+
+    if [[ $count -eq 0 ]]; then
+        echo "No PGP keys registered."
+    fi
+}
+
+do_crash() {
+    requires_root
+    require_module
+
+    echo "Force-removing ytblock module. This will trigger a kernel panic."
+    echo "System will crash and require a reboot."
+    echo ""
+    echo -n "Are you sure? (yes/NO): "
+    read -r confirm
+    if [[ "$confirm" != "yes" ]]; then
+        echo "Aborted."
+        exit 0
+    fi
+
+    echo "Triggering panic in 3 seconds..."
+    sleep 3
+    rmmod -f "$MODULE" 2>/dev/null || true
+}
+
+CMD="${1:-help}"
+shift 2>/dev/null || true
+
+case "$CMD" in
+    enable)      do_enable "$@" ;;
+    disable)     do_disable    ;;
+    block)       do_block "$@" ;;
+    unblock)     do_unblock "$@" ;;
+    status)      do_status    ;;
+    reload)      do_reload    ;;
+    add)         do_add "$@"  ;;
+    remove)      do_remove "$@" ;;
+    block-ip)    do_block_ip "$@" ;;
+    list)        do_list      ;;
+    key)         do_key       ;;
+    add-pgp)     do_add_pgp "$@" ;;
+    remove-pgp)  do_remove_pgp "$@" ;;
+    list-pgp)    do_list_pgp  ;;
+    crash)       do_crash     ;;
+    help|--help|-h) usage    ;;
+    *)
+        echo "Unknown command: $CMD"
+        usage
+        ;;
+esac
