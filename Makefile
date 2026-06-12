@@ -62,11 +62,24 @@ uninstall:
 	fi
 	@echo "Unloading module..."
 	@if [ -d /sys/kernel/ytblock ]; then \
-		/usr/local/bin/ytblockctl unblock 2>/dev/null || rmmod -f ytblock 2>/dev/null || true; \
+		echo 0 > /sys/kernel/ytblock/enabled 2>/dev/null; \
+		sleep 1; \
+		rmmod -f ytblock 2>/dev/null || true; \
 	fi
-	@KO_FILE="/lib/modules/$(shell uname -r)/extra/ytblock.ko"; \
+	@HOSTS_FILE="/etc/hosts"; \
 	MOD_LOAD="/etc/modules-load.d/ytblock.conf"; \
 	DOMAINS="/etc/ytblock/domains.conf"; \
+	for f in "$$HOSTS_FILE" "$$MOD_LOAD" "$$DOMAINS"; do \
+		if [ -f "$$f" ] && command -v chattr >/dev/null 2>&1; then \
+			chattr -i "$$f" 2>/dev/null || true; \
+		fi; \
+	done; \
+	HOSTS_MARKER="# ytblock managed entries - do not edit manually"; \
+	if grep -q "$$HOSTS_MARKER" "$$HOSTS_FILE" 2>/dev/null; then \
+		sed -i "/$$HOSTS_MARKER/,/^$$/d" "$$HOSTS_FILE"; \
+		echo "  Cleaned ytblock entries from /etc/hosts"; \
+	fi
+	@KO_FILE="/lib/modules/$(shell uname -r)/extra/ytblock.ko"; \
 	for f in "$$KO_FILE" "$$MOD_LOAD" "$$DOMAINS"; do \
 		if [ -f "$$f" ] && command -v chattr >/dev/null 2>&1; then \
 			chattr -i "$$f" 2>/dev/null || true; \

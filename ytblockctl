@@ -32,6 +32,9 @@ Usage:
       Configure domains to block (does NOT enable).
 
   ytblockctl unblock [--key <hex>]
+      Disable blocking (same as disable). Module stays loaded.
+
+  ytblockctl unload [--key <hex>]
       Remove module (needs key via PGP decrypt or --key).
 
   ytblockctl add <domain>
@@ -413,15 +416,6 @@ do_block() {
 do_unblock() {
     requires_root
 
-    local provided_key=""
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --key|-k) shift; provided_key="$1"; shift ;;
-            *) shift ;;
-        esac
-    done
-
     if module_loaded; then
         echo "0" > "$SYSFS_BASE/enabled" 2>/dev/null || true
     fi
@@ -433,7 +427,21 @@ do_unblock() {
         exit 0
     fi
 
+    echo -e "${GREEN}Blocking disabled. Module still loaded.${NC}"
+}
+
+do_unload() {
+    requires_root
+
     local key
+    local provided_key=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --key|-k) shift; provided_key="$1"; shift ;;
+            *) shift ;;
+        esac
+    done
 
     if [[ -n "$provided_key" ]]; then
         key="$provided_key"
@@ -455,6 +463,9 @@ do_unblock() {
         fi
     fi
 
+    # Clean hosts entries and remove immutability before module removal
+    clear_hosts
+
     echo -e "${CYAN}Authorizing module unload...${NC}"
     printf '%s' "$key" > "$SYSFS_BASE/unblock" 2>/dev/null || {
         echo -e "${RED}Failed to authorize unload. Invalid key?${NC}" >&2
@@ -467,7 +478,12 @@ do_unblock() {
     }
 
     rm -f "$STATE_FILE"
-    rm -rf "$PGP_ENC_DIR" /etc/ytblock/domains.conf
+    rm -rf "$PGP_ENC_DIR"
+    # Remove immutability before removing domains.conf
+    if command -v chattr &>/dev/null; then
+        chattr -i /etc/ytblock/domains.conf 2>/dev/null || true
+    fi
+    rm -rf /etc/ytblock
 
     echo -e "${GREEN}Unblocked. Module removed.${NC}"
 }
@@ -902,6 +918,7 @@ case "$CMD" in
     disable)     do_disable    ;;
     block)       do_block "$@" ;;
     unblock)     do_unblock "$@" ;;
+    unload)      do_unload "$@" ;;
     status)      do_status    ;;
     reload)      do_reload    ;;
     add)         do_add "$@"  ;;

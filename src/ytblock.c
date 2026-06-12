@@ -20,6 +20,7 @@
 #include <linux/timer.h>
 #include <linux/utsname.h>
 #include <linux/ktime.h>
+#include <linux/workqueue.h>
 #include <crypto/hash.h>
 #include <net/ipv6.h>
 #include <net/tcp.h>
@@ -42,7 +43,7 @@ static struct in6_addr *blocked_ips_v6;
 static int blocked_count_v6;
 static char blocked_domains[MAX_DOMAINS][MAX_DOMAIN_LEN];
 static int blocked_domain_count;
-static DEFINE_MUTEX(ip_list_mutex);
+static DEFINE_SPINLOCK(ip_list_lock);
 
 static bool allow_unload;
 static u8 unload_key[16];
@@ -72,19 +73,22 @@ static struct timer_list enable_timer;
 static bool enable_timer_active;
 static bool ref_taken;
 
+static struct work_struct yt_disable_work;
+static struct work_struct yt_protect_work;
+
 static bool is_ip_blocked(__be32 addr)
 {
 	int i;
 	bool found = false;
 
-	mutex_lock(&ip_list_mutex);
+	spin_lock_bh(&ip_list_lock);
 	for (i = 0; i < blocked_count_v4; i++) {
 		if (blocked_ips_v4[i] == addr) {
 			found = true;
 			break;
 		}
 	}
-	mutex_unlock(&ip_list_mutex);
+	spin_unlock_bh(&ip_list_lock);
 
 	return found;
 }
@@ -95,14 +99,14 @@ static bool is_ipv6_blocked(struct in6_addr *addr)
 	int i;
 	bool found = false;
 
-	mutex_lock(&ip_list_mutex);
+	spin_lock_bh(&ip_list_lock);
 	for (i = 0; i < blocked_count_v6; i++) {
 		if (ipv6_addr_equal(&blocked_ips_v6[i], addr)) {
 			found = true;
 			break;
 		}
 	}
-	mutex_unlock(&ip_list_mutex);
+	spin_unlock_bh(&ip_list_lock);
 
 	return found;
 }
@@ -111,19 +115,26 @@ static bool is_ipv6_blocked(struct in6_addr *addr)
 static bool domain_list_contains(const char *hostname)
 {
 	int i;
-	if (!READ_ONCE(blocked_domain_count))
-		return false;
+	bool found = false;
+
+	spin_lock_bh(&ip_list_lock);
+	if (!blocked_domain_count)
+		goto out;
 	for (i = 0; i < blocked_domain_count; i++) {
 		const char *blocked = blocked_domains[i];
 		int blen = strlen(blocked);
 		const char *p = hostname;
 		while (*p) {
-			if (strncasecmp(p, blocked, blen) == 0)
-				return true;
+			if (strncasecmp(p, blocked, blen) == 0) {
+				found = true;
+				goto out;
+			}
 			p++;
 		}
 	}
-	return false;
+out:
+	spin_unlock_bh(&ip_list_lock);
+	return found;
 }
 
 static bool sni_matches_blocked(const struct sk_buff *skb, struct tcphdr *tcph)
@@ -339,14 +350,17 @@ static unsigned int ytblock_hook_out6(unsigned int hooknum, struct sk_buff *skb,
 }
 #endif
 
+static void reset_blocked_conns(void);
+static void enable_blocking(unsigned int seconds);
+static void do_disable_work(struct work_struct *work);
+
 static void enable_timer_cb(struct timer_list *t)
 {
 	if (!READ_ONCE(enabled))
 		return;
 
 	if (ktime_get_real_seconds() >= expiry_seconds) {
-		WRITE_ONCE(enabled, false);
-		printk(KERN_INFO "ytblock: auto-disabled (timer expired)\n");
+		schedule_work(&yt_disable_work);
 		return;
 	}
 
@@ -359,30 +373,200 @@ static void enable_blocking(unsigned int seconds)
 	expiry_seconds = ktime_get_real_seconds() + seconds;
 	expiry_jiffies = jiffies + msecs_to_jiffies(seconds * 1000);
 	mod_timer(&enable_timer, jiffies + HZ);
-	enable_timer_active = true;
-	state_restored = false;
-	if (!ref_taken) {
+	WRITE_ONCE(enable_timer_active, true);
+	WRITE_ONCE(state_restored, false);
+	if (!READ_ONCE(ref_taken)) {
 		__module_get(THIS_MODULE);
-		ref_taken = true;
+		WRITE_ONCE(ref_taken, true);
 	}
+	reset_blocked_conns();
 	printk(KERN_INFO "ytblock: enabled for %u seconds\n", seconds);
 }
 
-static void disable_blocking(void)
+static void log_blocklist_on_disable(void)
 {
-	if (enable_timer_active) {
+	int i;
+
+	if (READ_ONCE(blocked_count_v4)) {
+		spin_lock_bh(&ip_list_lock);
+		printk(KERN_INFO "ytblock: blocked IPv4 on disable:");
+		for (i = 0; i < blocked_count_v4; i++)
+			printk(KERN_INFO "ytblock:   %pI4", &blocked_ips_v4[i]);
+		spin_unlock_bh(&ip_list_lock);
+	}
+
+	if (READ_ONCE(blocked_count_v6)) {
+		spin_lock_bh(&ip_list_lock);
+		printk(KERN_INFO "ytblock: blocked IPv6 on disable:");
+		for (i = 0; i < blocked_count_v6; i++)
+			printk(KERN_INFO "ytblock:   %pI6", &blocked_ips_v6[i]);
+		spin_unlock_bh(&ip_list_lock);
+	}
+
+	if (READ_ONCE(blocked_domain_count)) {
+		spin_lock_bh(&ip_list_lock);
+		printk(KERN_INFO "ytblock: blocked domains on disable:");
+		for (i = 0; i < blocked_domain_count; i++)
+			printk(KERN_INFO "ytblock:   %s", blocked_domains[i]);
+		spin_unlock_bh(&ip_list_lock);
+	}
+}
+
+static void reset_blocked_conns(void)
+{
+	int slot, reset = 0;
+	struct inet_hashinfo *hinfo;
+	struct sock *match_list[64];
+
+	if (!READ_ONCE(blocked_count_v4) && !READ_ONCE(blocked_count_v6))
+		return;
+
+	hinfo = tcp_prot.h.hashinfo;
+
+	for (slot = 0; slot <= hinfo->ehash_mask; slot++) {
+		struct inet_ehash_bucket *head = &hinfo->ehash[slot];
+		struct sock *sk;
+		struct hlist_nulls_node *node;
+		int n_match = 0;
+
+		spin_lock_bh(&hinfo->ehash_locks[slot & hinfo->ehash_locks_mask]);
+		sk_nulls_for_each(sk, node, &head->chain) {
+			bool blocked = false;
+
+			if (sk->sk_family == AF_INET)
+				blocked = is_ip_blocked(inet_sk(sk)->inet_daddr);
+#if IS_ENABLED(CONFIG_IPV6)
+			else if (sk->sk_family == AF_INET6)
+				blocked = is_ipv6_blocked(&sk->sk_v6_daddr);
+#endif
+			if (blocked) {
+				sock_hold(sk);
+				if (n_match < ARRAY_SIZE(match_list))
+					match_list[n_match++] = sk;
+				else {
+					sock_put(sk);
+					printk(KERN_WARNING "ytblock: match_list overflow, skipping\n");
+				}
+			}
+		}
+		spin_unlock_bh(&hinfo->ehash_locks[slot & hinfo->ehash_locks_mask]);
+
+		for (int i = 0; i < n_match; i++) {
+			sk = match_list[i];
+			if (sk->sk_family == AF_INET) {
+				struct inet_sock *inet = inet_sk(sk);
+				tcp_done(sk);
+				reset++;
+				printk(KERN_INFO "ytblock: reset TCP %pI4:%d -> %pI4:%d\n",
+				       &inet->inet_saddr, ntohs(inet->inet_sport),
+				       &inet->inet_daddr, ntohs(inet->inet_dport));
+			}
+#if IS_ENABLED(CONFIG_IPV6)
+			else if (sk->sk_family == AF_INET6) {
+				tcp_done(sk);
+				reset++;
+				printk(KERN_INFO "ytblock: reset TCP6 [%pI6c]:%d -> [%pI6c]:%d\n",
+				       &sk->sk_v6_rcv_saddr, ntohs(inet_sk(sk)->inet_sport),
+				       &sk->sk_v6_daddr, ntohs(inet_sk(sk)->inet_dport));
+			}
+#endif
+			sock_put(sk);
+		}
+	}
+
+	if (reset)
+		printk(KERN_INFO "ytblock: reset %d blocked TCP connections\n", reset);
+}
+
+#define HOSTS_MARKER "# ytblock managed entries - do not edit manually"
+
+static void clear_hosts_from_kernel(void)
+{
+	struct file *file;
+	struct path kp;
+	struct inode *inode;
+	loff_t pos;
+	char *buf, *out, *p;
+	ssize_t len, out_len;
+
+	file = filp_open("/etc/hosts", O_RDWR, 0);
+	if (IS_ERR(file))
+		return;
+
+	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!buf) {
+		filp_close(file, NULL);
+		return;
+	}
+
+	pos = 0;
+	len = kernel_read(file, buf, PAGE_SIZE - 1, &pos);
+	if (len <= 0)
+		goto close;
+
+	buf[len] = '\0';
+
+	p = strstr(buf, HOSTS_MARKER);
+	if (!p)
+		goto close;
+
+	out_len = p - buf;
+	while (out_len > 0 && buf[out_len - 1] == '\n')
+		out_len--;
+	out = kmalloc(out_len + 2, GFP_KERNEL);
+	if (!out)
+		goto close;
+
+	memcpy(out, buf, out_len);
+	out[out_len] = '\n';
+	out_len++;
+	out[out_len] = '\0';
+
+	if (!kern_path("/etc/hosts", 0, &kp)) {
+		inode = d_inode(kp.dentry);
+		if (inode) {
+			inode_lock(inode);
+			if (inode->i_flags & S_IMMUTABLE)
+				inode_set_flags(inode, 0, S_IMMUTABLE);
+			vfs_truncate(&kp, out_len);
+			inode_unlock(inode);
+		}
+		path_put(&kp);
+	}
+
+	pos = 0;
+	kernel_write(file, out, out_len, &pos);
+	filp_close(file, NULL);
+	printk(KERN_INFO "ytblock: cleared hosts file entries\n");
+	kfree(out);
+close:
+	kfree(buf);
+}
+
+static void do_disable_work(struct work_struct *work)
+{
+	log_blocklist_on_disable();
+	reset_blocked_conns();
+	clear_hosts_from_kernel();
+
+	if (READ_ONCE(enable_timer_active)) {
 		timer_delete_sync(&enable_timer);
-		enable_timer_active = false;
+		WRITE_ONCE(enable_timer_active, false);
 	}
 	WRITE_ONCE(enabled, false);
 	expiry_jiffies = 0;
 	expiry_seconds = 0;
-	state_restored = false;
-	if (ref_taken) {
+	WRITE_ONCE(state_restored, false);
+	if (READ_ONCE(ref_taken)) {
 		module_put(THIS_MODULE);
-		ref_taken = false;
+		WRITE_ONCE(ref_taken, false);
 	}
 	printk(KERN_INFO "ytblock: disabled\n");
+}
+
+static void disable_blocking(void)
+{
+	schedule_work(&yt_disable_work);
 }
 
 static void protect_file(const char *path)
@@ -411,7 +595,7 @@ put:
 	path_put(&kp);
 }
 
-static void protect_callback(struct timer_list *t)
+static void do_protect_work(struct work_struct *work)
 {
 	int i;
 
@@ -420,9 +604,14 @@ static void protect_callback(struct timer_list *t)
 			protect_file(protected_files[i].path);
 	}
 
-	if (!allow_unload)
+	if (!READ_ONCE(allow_unload))
 		mod_timer(&protect_timer,
 			  jiffies + msecs_to_jiffies(PROTECT_INTERVAL_MS));
+}
+
+static void protect_callback(struct timer_list *t)
+{
+	schedule_work(&yt_protect_work);
 }
 
 static void add_protected_file(const char *path)
@@ -481,8 +670,9 @@ static void cleanup_file_protection(void)
 		timer_delete_sync(&protect_timer);
 		timer_active = false;
 	}
+	cancel_work_sync(&yt_protect_work);
 
-	if (!allow_unload)
+	if (!READ_ONCE(allow_unload))
 		return;
 
 	for (i = 0; i < num_protected_files; i++) {
@@ -535,8 +725,8 @@ static ssize_t status_show(struct kobject *kobj, struct kobj_attribute *attr,
 		       READ_ONCE(enabled), READ_ONCE(blocked_count_v4),
 		       READ_ONCE(blocked_count_v6),
 		       READ_ONCE(blocked_domain_count),
-		       rem, allow_unload,
-		       num_protected_files, state_restored);
+		       rem, READ_ONCE(allow_unload),
+		       num_protected_files, READ_ONCE(state_restored));
 }
 
 static ssize_t enabled_show(struct kobject *kobj, struct kobj_attribute *attr,
@@ -575,7 +765,7 @@ static ssize_t blocked_ips_show(struct kobject *kobj, struct kobj_attribute *att
 				char *buf)
 {
 	int i, len = 0;
-	mutex_lock(&ip_list_mutex);
+	spin_lock_bh(&ip_list_lock);
 	for (i = 0; i < blocked_count_v4 && len < PAGE_SIZE - 50; i++) {
 		__be32 addr = blocked_ips_v4[i];
 		len += sprintf(buf + len, "%pI4\n", &addr);
@@ -583,7 +773,7 @@ static ssize_t blocked_ips_show(struct kobject *kobj, struct kobj_attribute *att
 	for (i = 0; i < blocked_count_v6 && len < PAGE_SIZE - 50; i++) {
 		len += sprintf(buf + len, "%pI6\n", &blocked_ips_v6[i]);
 	}
-	mutex_unlock(&ip_list_mutex);
+	spin_unlock_bh(&ip_list_lock);
 	return len;
 }
 
@@ -627,12 +817,12 @@ static ssize_t blocked_ips_store(struct kobject *kobj, struct kobj_attribute *at
 		}
 	}
 
-	mutex_lock(&ip_list_mutex);
+	spin_lock_bh(&ip_list_lock);
 	memcpy(blocked_ips_v4, tmp_v4, n4 * sizeof(__be32));
 	memcpy(blocked_ips_v6, tmp_v6, n6 * sizeof(struct in6_addr));
 	WRITE_ONCE(blocked_count_v4, n4);
 	WRITE_ONCE(blocked_count_v6, n6);
-	mutex_unlock(&ip_list_mutex);
+	spin_unlock_bh(&ip_list_lock);
 
 	kfree(tmp_v4);
 	kfree(tmp_v6);
@@ -644,11 +834,11 @@ static ssize_t blocked_domains_show(struct kobject *kobj, struct kobj_attribute 
 				    char *buf)
 {
 	int i, len = 0;
-	mutex_lock(&ip_list_mutex);
+	spin_lock_bh(&ip_list_lock);
 	for (i = 0; i < blocked_domain_count && len < PAGE_SIZE - MAX_DOMAIN_LEN; i++) {
 		len += sprintf(buf + len, "%s\n", blocked_domains[i]);
 	}
-	mutex_unlock(&ip_list_mutex);
+	spin_unlock_bh(&ip_list_lock);
 	return len;
 }
 
@@ -656,7 +846,6 @@ static ssize_t blocked_domains_store(struct kobject *kobj, struct kobj_attribute
 				     const char *buf, size_t count)
 {
 	char *copy, *orig, *token;
-	int nd = 0;
 
 	copy = kmemdup(buf, count + 1, GFP_KERNEL);
 	if (!copy)
@@ -664,22 +853,24 @@ static ssize_t blocked_domains_store(struct kobject *kobj, struct kobj_attribute
 	orig = copy;
 	copy[count] = '\0';
 
-	while ((token = strsep(&copy, "\n")) && nd < MAX_DOMAINS) {
-		int len;
+	spin_lock_bh(&ip_list_lock);
+	{
+		int nd = 0;
+		while ((token = strsep(&copy, "\n")) && nd < MAX_DOMAINS) {
+			int len;
 
-		if (token[0] == '\0' || token[0] == '#')
-			continue;
-		len = strlen(token);
-		if (len >= MAX_DOMAIN_LEN)
-			len = MAX_DOMAIN_LEN - 1;
-		memcpy(blocked_domains[nd], token, len);
-		blocked_domains[nd][len] = '\0';
-		nd++;
+			if (token[0] == '\0' || token[0] == '#')
+				continue;
+			len = strlen(token);
+			if (len >= MAX_DOMAIN_LEN)
+				len = MAX_DOMAIN_LEN - 1;
+			memcpy(blocked_domains[nd], token, len);
+			blocked_domains[nd][len] = '\0';
+			nd++;
+		}
+		blocked_domain_count = nd;
 	}
-
-	mutex_lock(&ip_list_mutex);
-	blocked_domain_count = nd;
-	mutex_unlock(&ip_list_mutex);
+	spin_unlock_bh(&ip_list_lock);
 
 	kfree(orig);
 	return count;
@@ -688,7 +879,8 @@ static ssize_t blocked_domains_store(struct kobject *kobj, struct kobj_attribute
 static ssize_t block_count_show(struct kobject *kobj, struct kobj_attribute *attr,
 				char *buf)
 {
-	return sprintf(buf, "%d\n", blocked_count_v4 + blocked_count_v6);
+	return sprintf(buf, "%d\n",
+		       READ_ONCE(blocked_count_v4) + READ_ONCE(blocked_count_v6));
 }
 
 static int hex_val(char c)
@@ -729,15 +921,15 @@ static ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 	if (!crypto_shash_digest(desc, parsed, 16, input_hash)) {
 		if (memcmp(input_hash, key_hash, 32) == 0) {
-			allow_unload = true;
+			WRITE_ONCE(allow_unload, true);
 			WRITE_ONCE(enabled, false);
-			if (ref_taken) {
+			if (READ_ONCE(ref_taken)) {
 				module_put(THIS_MODULE);
-				ref_taken = false;
+				WRITE_ONCE(ref_taken, false);
 			}
 			memzero_explicit(unload_key, 16);
 			memzero_explicit(key_hash, 32);
-			state_restored = false;
+			WRITE_ONCE(state_restored, false);
 			printk(KERN_INFO "ytblock: unload authorized, auto-disabled\n");
 			crypto_free_shash(tfm);
 			return count;
@@ -752,7 +944,7 @@ static ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 static ssize_t unload_key_show(struct kobject *kobj, struct kobj_attribute *attr,
 			       char *buf)
 {
-	if (state_restored)
+	if (READ_ONCE(state_restored))
 		return sprintf(buf, "restored\n");
 
 	char *p = buf;
@@ -789,20 +981,21 @@ static ssize_t restore_store(struct kobject *kobj, struct kobj_attribute *attr,
 	}
 
 	memcpy(key_hash, parsed_hash, 32);
-	state_restored = true;
-	allow_unload = false;
+	WRITE_ONCE(state_restored, true);
+	WRITE_ONCE(allow_unload, false);
 
 	u64 delta = parsed_expiry - ktime_get_real_seconds();
 	expiry_seconds = parsed_expiry;
 	expiry_jiffies = jiffies + msecs_to_jiffies(delta * 1000);
 
 	WRITE_ONCE(enabled, true);
-	if (!ref_taken) {
+	if (!READ_ONCE(ref_taken)) {
 		__module_get(THIS_MODULE);
-		ref_taken = true;
+		WRITE_ONCE(ref_taken, true);
 	}
+	reset_blocked_conns();
 	mod_timer(&enable_timer, jiffies + HZ);
-	enable_timer_active = true;
+	WRITE_ONCE(enable_timer_active, true);
 
 	printk(KERN_INFO "ytblock: state restored, %llu seconds remaining\n", delta);
 	return count;
@@ -855,16 +1048,20 @@ static void ytblock_cleanup_netfilter(void)
 
 static void __exit ytblock_exit(void)
 {
-	if (READ_ONCE(enabled) && !allow_unload) {
+	if (READ_ONCE(enabled) && !READ_ONCE(allow_unload)) {
 		panic("ytblock: FORCED UNLOAD DETECTED while enabled. System halted.");
 	}
 
-	if (enable_timer_active) {
+	if (READ_ONCE(enable_timer_active)) {
 		timer_delete_sync(&enable_timer);
-		enable_timer_active = false;
+		WRITE_ONCE(enable_timer_active, false);
 	}
+	cancel_work_sync(&yt_disable_work);
+	cancel_work_sync(&yt_protect_work);
 
-	allow_unload = true;
+	clear_hosts_from_kernel();
+
+	WRITE_ONCE(allow_unload, true);
 	cleanup_file_protection();
 	ytblock_cleanup_netfilter();
 
@@ -887,7 +1084,10 @@ static int __init ytblock_init(void)
 	enabled = false;
 	expiry_jiffies = 0;
 	expiry_seconds = 0;
-	state_restored = false;
+	WRITE_ONCE(state_restored, false);
+
+	INIT_WORK(&yt_disable_work, do_disable_work);
+	INIT_WORK(&yt_protect_work, do_protect_work);
 
 	blocked_ips_v4 = kmalloc_array(MAX_IPS_V4, sizeof(__be32), GFP_KERNEL);
 	if (!blocked_ips_v4) return -ENOMEM;
