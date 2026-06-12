@@ -5,22 +5,22 @@ case "$1" in
     configure)
         depmod -a
 
-        echo "ytblock" > /etc/modules-load.d/ytblock.conf
+        echo "kblocker" > /etc/modules-load.d/kblocker.conf
 
-        KO_FILE="/lib/modules/$(uname -r)/extra/ytblock.ko"
+        KO_FILE="/lib/modules/$(uname -r)/extra/kblocker.ko"
         if [ -f "$KO_FILE" ] && command -v chattr >/dev/null 2>&1; then
             chattr +i "$KO_FILE" 2>/dev/null || true
         fi
 
-        modprobe ytblock 2>/dev/null || \
-            echo "Warning: could not load ytblock module. Reboot or run 'modprobe ytblock'." >&2
+        modprobe kblocker 2>/dev/null || \
+            echo "Warning: could not load kblocker module. Reboot or run 'modprobe kblocker'." >&2
 
-        /usr/local/bin/ytblockctl block youtube.com www.youtube.com m.youtube.com \
+        /usr/local/bin/kblockerctl block youtube.com www.youtube.com m.youtube.com \
             youtu.be ytimg.com googlevideo.com gvt2.com 2>/dev/null || true
 
-        echo "ytblock installed (disabled by default)."
-        echo "  ytblockctl enable 60   — block for 60 minutes"
-        echo "  ytblockctl disable     — stop blocking"
-        echo "  ytblockctl status      — check status"
+        echo "kblocker installed (disabled by default)."
+        echo "  kblockerctl enable 60   — block for 60 minutes"
+        echo "  kblockerctl disable     — stop blocking"
+        echo "  kblockerctl status      — check status"
         ;;
 esac

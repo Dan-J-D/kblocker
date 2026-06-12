@@ -1,5 +1,5 @@
 #!/bin/bash
-# ytblock integration tests
+# kblocker integration tests
 # Runs against the live kernel module via sysfs.
 # Requires root. Run: sudo ./test.sh
 
@@ -7,17 +7,17 @@ PWD=$(dirname "$(readlink -f "$0")")
 PASS=0
 FAIL=0
 
-SYSFS="/sys/kernel/ytblock"
-MODULE="ytblock"
+SYSFS="/sys/kernel/kblocker"
+MODULE="kblocker"
 TMPDIR=$(mktemp -d)
 
 cleanup() {
 	rm -rf "$TMPDIR"
-	# Wipe any persistent test state from ytblockctl
-	chattr -i /var/lib/ytblock/state 2>/dev/null || true
-	rm -f /var/lib/ytblock/state
-	rm -rf /var/lib/ytblock/unlock-pgp
-	rm -rf /etc/ytblock/keys
+	# Wipe any persistent test state from kblockerctl
+	chattr -i /var/lib/kblocker/state 2>/dev/null || true
+	rm -f /var/lib/kblocker/state
+	rm -rf /var/lib/kblocker/unlock-pgp
+	rm -rf /etc/kblocker/keys
 	# Try to force module removal safely
 	if [[ -d "$SYSFS" ]]; then
 		echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
@@ -32,13 +32,13 @@ ok()   { PASS=$((PASS+1)); echo -e "  \033[0;32mPASS\033[0m $1"; }
 fail() { FAIL=$((FAIL+1)); echo -e "  \033[0;31mFAIL\033[0m $1"; }
 check() { if "$@"; then ok "$*"; else fail "$*"; return 1; fi; }
 
-echo "=== ytblock integration tests ==="
+echo "=== kblocker integration tests ==="
 echo ""
 
 # Force-clean any state leftover from interrupted test runs
-rm -rf /etc/ytblock/keys /var/lib/ytblock/unlock-pgp
-chattr -i /var/lib/ytblock/state 2>/dev/null || true
-rm -f /var/lib/ytblock/state
+rm -rf /etc/kblocker/keys /var/lib/kblocker/unlock-pgp
+chattr -i /var/lib/kblocker/state 2>/dev/null || true
+rm -f /var/lib/kblocker/state
 
 # --- Build ---
 echo "--- Build ---"
@@ -51,7 +51,7 @@ fi
 
 # --- Load ---
 echo "--- Load ---"
-if insmod ytblock.ko 2>/dev/null; then
+if insmod kblocker.ko 2>/dev/null; then
     ok "insmod succeeds"
 else
     fail "insmod succeeds"
@@ -74,33 +74,33 @@ check grep -q '^protected_files:' <<<"$STATUS"
 # --- file protection ---
 echo "--- file protection ---"
 
-KO_FILE="/lib/modules/$(uname -r)/extra/ytblock.ko"
+KO_FILE="/lib/modules/$(uname -r)/extra/kblocker.ko"
 if [[ -f "$KO_FILE" ]] && command -v lsattr &>/dev/null; then
     ATTRS=$(lsattr "$KO_FILE" 2>/dev/null | awk '{print $1}')
     if echo "$ATTRS" | grep -q 'i'; then
-        ok "protection: ytblock.ko is immutable"
+        ok "protection: kblocker.ko is immutable"
     fi
 fi
 if [[ -f "$KO_FILE" ]]; then
     if echo "x" > "$KO_FILE" 2>/dev/null; then
-        fail "protection: ytblock.ko write should be rejected"
+        fail "protection: kblocker.ko write should be rejected"
     else
-        ok "protection: ytblock.ko write rejected"
+        ok "protection: kblocker.ko write rejected"
     fi
 fi
 
-CFG_FILE="/etc/modules-load.d/ytblock.conf"
+CFG_FILE="/etc/modules-load.d/kblocker.conf"
 if [[ -f "$CFG_FILE" ]] && command -v lsattr &>/dev/null; then
     ATTRS=$(lsattr "$CFG_FILE" 2>/dev/null | awk '{print $1}')
     if echo "$ATTRS" | grep -q 'i'; then
-        ok "protection: ytblock.conf is immutable"
+        ok "protection: kblocker.conf is immutable"
     fi
 fi
 if [[ -f "$CFG_FILE" ]]; then
     if echo "x" > "$CFG_FILE" 2>/dev/null; then
-        fail "protection: ytblock.conf write should be rejected"
+        fail "protection: kblocker.conf write should be rejected"
     else
-        ok "protection: ytblock.conf write rejected"
+        ok "protection: kblocker.conf write rejected"
     fi
 fi
 
@@ -123,7 +123,7 @@ else
 fi
 # Verify it changes on reload
 rmmod $MODULE 2>/dev/null || true
-insmod ytblock.ko 2>/dev/null
+insmod kblocker.ko 2>/dev/null
 KEY2=$(cat "$SYSFS/key")
 if [[ "$KEY" != "$KEY2" ]]; then
     ok "key changes across reloads"
@@ -151,7 +151,7 @@ check grep -q '^enabled: 0$' < "$SYSFS/status"
 # --- ensure unblock is one-shot ---
 echo "--- unblock (replay attack) ---"
 rmmod $MODULE 2>/dev/null || true
-insmod ytblock.ko 2>/dev/null
+insmod kblocker.ko 2>/dev/null
 NEW_KEY=$(cat "$SYSFS/key")
 # Try old key
 if echo "00000000000000000000000000000000" > "$SYSFS/unblock" 2>/dev/null; then
@@ -166,7 +166,7 @@ check grep -q '^allow_unload: 1$' < "$SYSFS/status"
 # --- enabled toggle ---
 echo "--- enabled ---"
 rmmod $MODULE 2>/dev/null || true
-insmod ytblock.ko 2>/dev/null
+insmod kblocker.ko 2>/dev/null
 echo "30" > "$SYSFS/enabled"
 check grep -q '^enabled: 1$' < "$SYSFS/status"
 # remaining should be approx 30
@@ -190,7 +190,7 @@ fi
 # --- blocked_ips round-trip ---
 echo "--- blocked_ips ---"
 rmmod $MODULE 2>/dev/null || true
-insmod ytblock.ko 2>/dev/null
+insmod kblocker.ko 2>/dev/null
 check grep -q '^blocked_ips_v4: 0$' < "$SYSFS/status"
 echo "10.0.0.1" > "$SYSFS/blocked_ips"
 check grep -q '^blocked_ips_v4: 1$' < "$SYSFS/status"
@@ -236,14 +236,14 @@ check test "$(cat "$SYSFS/blocked_ips" | wc -l)" -eq 2
 
 # --- block-ip command ---
 echo "--- block-ip command ---"
-"$PWD/ytblockctl" block-ip 10.0.0.100 10.0.0.101 2>/dev/null
+"$PWD/kblockerctl" block-ip 10.0.0.100 10.0.0.101 2>/dev/null
 check grep -q '^blocked_ips_v4: 2$' < "$SYSFS/status"
 check grep -q '^blocked_ips_v6: 0$' < "$SYSFS/status"
 check grep -q '10.0.0.100' < "$SYSFS/blocked_ips"
 check grep -q '10.0.0.101' < "$SYSFS/blocked_ips"
 
 # block-ip with IPv6
-"$PWD/ytblockctl" block-ip 2001:db8::1 2001:db8::2 2>/dev/null
+"$PWD/kblockerctl" block-ip 2001:db8::1 2001:db8::2 2>/dev/null
 check grep -q '^blocked_ips_v4: 0$' < "$SYSFS/status"
 check grep -q '^blocked_ips_v6: 2$' < "$SYSFS/status"
 check grep -q ':' < "$SYSFS/blocked_ips"
@@ -345,7 +345,7 @@ fi
 # --- Bypass prevention tests ---
 echo "--- bypass prevention ---"
 rmmod $MODULE 2>/dev/null || true
-insmod ytblock.ko 2>/dev/null
+insmod kblocker.ko 2>/dev/null
 
 # Can't modify blocked_domains while enabled
 echo "youtube.com" > "$SYSFS/blocked_domains"
@@ -382,7 +382,7 @@ echo "" > "$SYSFS/blocked_domains"
 # --- PGP mode tests ---
 echo "--- PGP mode ---"
 rmmod $MODULE 2>/dev/null || true
-insmod ytblock.ko 2>/dev/null
+insmod kblocker.ko 2>/dev/null
 
 DEMO_KEY="$PWD/recipients/danyoutube_0x5E369F1437D6056A_public.asc"
 if [[ -f "$DEMO_KEY" ]]; then
@@ -393,7 +393,7 @@ if [[ -f "$DEMO_KEY" ]]; then
 
     # Import the test PGP key in isolated keyring
     GNUPGHOME="$PGP_TMP" gpg --import "$DEMO_KEY" 2>/dev/null
-    GNUPGHOME="$PGP_TMP" "$PWD/ytblockctl" add-pgp "$DEMO_KEY" "testuser" 2>/dev/null
+    GNUPGHOME="$PGP_TMP" "$PWD/kblockerctl" add-pgp "$DEMO_KEY" "testuser" 2>/dev/null
     ok "PGP: demo public key registered"
 
     # Save the unload key BEFORE enabling (it will be erased from memory on enable)
@@ -405,7 +405,7 @@ if [[ -f "$DEMO_KEY" ]]; then
     fi
 
     # Enable — this encrypts the key and activates PGP mode
-    if GNUPGHOME="$PGP_TMP" "$PWD/ytblockctl" enable 5 2>/dev/null; then
+    if GNUPGHOME="$PGP_TMP" "$PWD/kblockerctl" enable 5 2>/dev/null; then
         ok "PGP: enable succeeds with PGP key"
     else
         fail "PGP: enable fails with PGP key"
@@ -458,8 +458,8 @@ echo "0" > "$SYSFS/enabled" 2>/dev/null || true
 # --- Key exposure tests ---
 echo "--- key exposure ---"
 rmmod $MODULE 2>/dev/null || true
-chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
-insmod ytblock.ko 2>/dev/null
+chattr -i /var/lib/kblocker/state 2>/dev/null || true; rm -f /var/lib/kblocker/state
+insmod kblocker.ko 2>/dev/null
 
 # Key should NOT appear in kernel log
 KEY_VALUE=$(cat "$SYSFS/key")
@@ -477,7 +477,7 @@ else
 fi
 
 # PGP ciphertext files have 600 permissions
-PGP_ENC_DIR="/var/lib/ytblock/unlock-pgp"
+PGP_ENC_DIR="/var/lib/kblocker/unlock-pgp"
 if [[ -d "$PGP_ENC_DIR" ]]; then
     BAD_PERMS=0
     for f in "$PGP_ENC_DIR"/unlock-*.asc; do
@@ -499,16 +499,16 @@ fi
 # --- /etc/hosts update via kernel ---
 echo "--- hosts file update ---"
 rmmod $MODULE 2>/dev/null || true
-chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
-insmod ytblock.ko 2>/dev/null
+chattr -i /var/lib/kblocker/state 2>/dev/null || true; rm -f /var/lib/kblocker/state
+insmod kblocker.ko 2>/dev/null
 
-HOSTS_MARKER="# ytblock managed entries"
+HOSTS_MARKER="# kblocker managed entries"
 echo "test-blocked.com" > "$SYSFS/blocked_domains"
 echo 1 > "$SYSFS/update_hosts" 2>/dev/null
 if grep -q "$HOSTS_MARKER" /etc/hosts; then
-    ok "hosts: kernel wrote ytblock entries to /etc/hosts"
+    ok "hosts: kernel wrote kblocker entries to /etc/hosts"
 else
-    fail "hosts: ytblock entries missing from /etc/hosts"
+    fail "hosts: kblocker entries missing from /etc/hosts"
 fi
 if grep -q "0.0.0.0 test-blocked.com" /etc/hosts; then
     ok "hosts: IPv4 entry present"
@@ -560,8 +560,8 @@ fi
 
 # Re-insert for clean unload test
 rmmod -f $MODULE 2>/dev/null || true
-chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
-insmod ytblock.ko 2>/dev/null
+chattr -i /var/lib/kblocker/state 2>/dev/null || true; rm -f /var/lib/kblocker/state
+insmod kblocker.ko 2>/dev/null
 
 # --- clean unload via unblock path ---
 echo "--- clean unload ---"
@@ -587,7 +587,7 @@ fi
 
 # --- restore sysfs ---
 echo "--- restore ---"
-insmod "$PWD/ytblock.ko" 2>/dev/null
+insmod "$PWD/kblocker.ko" 2>/dev/null
 # New key auto-generated
 RESTORE_KEY=$(cat "$SYSFS/key")
 RESTORE_HASH=$(printf '%s' "$RESTORE_KEY" | xxd -r -p | sha256sum | cut -d' ' -f1)
@@ -623,8 +623,8 @@ rmmod $MODULE 2>/dev/null || rmmod -f $MODULE 2>/dev/null || true
 
 # --- already-expired restore should be rejected ---
 echo "--- restore (already expired) ---"
-chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
-insmod "$PWD/ytblock.ko" 2>/dev/null
+chattr -i /var/lib/kblocker/state 2>/dev/null || true; rm -f /var/lib/kblocker/state
+insmod "$PWD/kblocker.ko" 2>/dev/null
 EXPIRED=$(( $(date -u +%s) - 60 ))
 printf '%s:%s' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$EXPIRED" > "$SYSFS/restore" 2>/dev/null
 check grep -q '^enabled: 0$' < "$SYSFS/status"

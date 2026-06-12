@@ -2,13 +2,13 @@
 
 set -e
 
-SYSFS_BASE="/sys/kernel/ytblock"
-MODULE="ytblock"
-PGP_KEY_DIR="/etc/ytblock/keys"
-PGP_ENC_DIR="/var/lib/ytblock/unlock-pgp"
-STATE_FILE="/var/lib/ytblock/state"
-BLOCKED_DOMAINS_FILE="/etc/ytblock/domains.conf"
-HOSTS_MARKER="# ytblock managed entries - do not edit manually"
+SYSFS_BASE="/sys/kernel/kblocker"
+MODULE="kblocker"
+PGP_KEY_DIR="/etc/kblocker/keys"
+PGP_ENC_DIR="/var/lib/kblocker/unlock-pgp"
+STATE_FILE="/var/lib/kblocker/state"
+BLOCKED_DOMAINS_FILE="/etc/kblocker/domains.conf"
+HOSTS_MARKER="# kblocker managed entries - do not edit manually"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -18,61 +18,61 @@ NC='\033[0m'
 
 usage() {
     cat <<EOF
-ytblockctl - ytblock control tool
+kblockerctl - kblocker control tool
 
 Usage:
-  ytblockctl enable [minutes] [--insecure]
+  kblockerctl enable [minutes] [--insecure]
       Enable blocking. Default: 60 minutes.
       Requires registered PGP keys unless --insecure is set.
 
-  ytblockctl disable
+  kblockerctl disable
       Disable blocking. Module stays loaded.
 
-  ytblockctl block <domain> [<domain>...]
+  kblockerctl block <domain> [<domain>...]
       Configure domains to block (does NOT enable).
 
-  ytblockctl unblock [--key <hex>]
+  kblockerctl unblock [--key <hex>]
       Disable blocking (same as disable). Module stays loaded.
 
-  ytblockctl unload [--key <hex>]
+  kblockerctl unload [--key <hex>]
       Remove module (needs key via PGP decrypt or --key).
 
-  ytblockctl add <domain>
+  kblockerctl add <domain>
       Add a domain to the block list.
 
-  ytblockctl remove <domain>
+  kblockerctl remove <domain>
       Remove a domain from the block list.
 
-  ytblockctl status
+  kblockerctl status
       Show current status.
 
-  ytblockctl reload
+  kblockerctl reload
       Re-write all configured domains to kernel module.
 
-  ytblockctl block-ip <ip> [<ip>...]
+  kblockerctl block-ip <ip> [<ip>...]
       Manually set blocked IPs (replaces existing list).
 
-  ytblockctl list
+  kblockerctl list
       Show blocked IPs and configured domains.
 
-  ytblockctl key
+  kblockerctl key
       Show unload key and PGP key fingerprints.
 
-  ytblockctl add-pgp <pubkey.asc> [name]
+  kblockerctl add-pgp <pubkey.asc> [name]
       Register a PGP public key for unlock encryption.
       Optionally assign a name (e.g. "alice") to identify it later.
 
-  ytblockctl remove-pgp <fingerprint>
+  kblockerctl remove-pgp <fingerprint>
       Remove a registered PGP key.
 
-  ytblockctl list-pgp
+  kblockerctl list-pgp
       List registered PGP keys.
 
-  ytblockctl pgp-cipher <fingerprint>
+  kblockerctl pgp-cipher <fingerprint>
       Print the PGP-encrypted unload key for a registered key.
       Useful for copying to another machine to decrypt.
 
-  ytblockctl crash
+  kblockerctl crash
       Trigger kernel panic (for emergency willpower).
 
 EOF
@@ -92,7 +92,7 @@ module_loaded() {
 
 require_module() {
 	if ! module_loaded; then
-		echo "Error: ytblock module not loaded." >&2
+		echo "Error: kblocker module not loaded." >&2
 		echo "Run 'sudo modprobe $MODULE' or 'sudo make install' first." >&2
 		exit 1
 	fi
@@ -103,7 +103,7 @@ require_disabled() {
 	state=$(cat "$SYSFS_BASE/enabled" 2>/dev/null | awk '{print $1}')
 	if [[ "$state" == "1" ]]; then
 		echo -e "${RED}Error: cannot modify domains while blocking is active.${NC}" >&2
-		echo "  Disable first: ytblockctl disable" >&2
+		echo "  Disable first: kblockerctl disable" >&2
 		exit 1
 	fi
 }
@@ -147,9 +147,9 @@ read_configured_domains() {
 
 save_domains() {
 	local domains=("$@")
-	mkdir -p /etc/ytblock
+	mkdir -p /etc/kblocker
 	if command -v chattr &>/dev/null; then
-		chattr -i /etc/ytblock/domains.conf 2>/dev/null || true
+		chattr -i /etc/kblocker/domains.conf 2>/dev/null || true
 	fi
 	printf '%s\n' "${domains[@]}" > "$BLOCKED_DOMAINS_FILE"
 	chmod 644 "$BLOCKED_DOMAINS_FILE"
@@ -256,7 +256,7 @@ state_expiry() {
 store_state() {
     local hex_key="$1"
     local expiry="$2"
-    mkdir -p /var/lib/ytblock
+    mkdir -p /var/lib/kblocker
     local hash_hex
     hash_hex=$(printf '%s' "$hex_key" | xxd -r -p | sha256sum | cut -d' ' -f1 2>/dev/null)
     if [[ -z "$hash_hex" ]]; then
@@ -335,7 +335,7 @@ if [[ ${#domains[@]} -gt 0 ]]; then
     # Try to enable in kernel FIRST — fails if PGP active and already enabled
     echo "$((minutes * 60))" > "$SYSFS_BASE/enabled" 2>/dev/null || {
         echo -e "${RED}Failed to enable blocking${NC}" >&2
-        echo "  If PGP mode is active, disable first: ytblockctl unblock" >&2
+        echo "  If PGP mode is active, disable first: kblockerctl unblock" >&2
         exit 1
     }
 
@@ -356,11 +356,11 @@ if [[ ${#domains[@]} -gt 0 ]]; then
             else
                 echo -e "${RED}No PGP keys registered.${NC}"
                 echo "  Register a PGP public key first:"
-                echo "    ytblockctl add-pgp <pubkey.asc>"
+                echo "    kblockerctl add-pgp <pubkey.asc>"
                 echo ""
                 echo "  Or use --insecure to print the key to stdout"
                 echo "  (you must save it yourself):"
-                echo "    ytblockctl enable $minutes --insecure"
+                echo "    kblockerctl enable $minutes --insecure"
                 exit 1
             fi
         else
@@ -422,7 +422,7 @@ do_block() {
 	echo -e "${CYAN}Saving domain configuration...${NC}"
     save_domains "${domains[@]}"
 
-    echo -e "${GREEN}Configured ${#domains[@]} domains. Run 'ytblockctl enable' to activate.${NC}"
+    echo -e "${GREEN}Configured ${#domains[@]} domains. Run 'kblockerctl enable' to activate.${NC}"
 }
 
 do_unblock() {
@@ -522,16 +522,16 @@ do_unload() {
     rm -rf "$PGP_ENC_DIR"
     # Remove immutability before removing domains.conf
     if command -v chattr &>/dev/null; then
-        chattr -i /etc/ytblock/domains.conf 2>/dev/null || true
+        chattr -i /etc/kblocker/domains.conf 2>/dev/null || true
     fi
-    rm -rf /etc/ytblock
+    rm -rf /etc/kblocker
 
     echo -e "${GREEN}Unblocked. Module removed.${NC}"
 }
 
 do_status() {
     if ! module_loaded; then
-        echo "ytblock: NOT LOADED"
+        echo "kblocker: NOT LOADED"
         exit 0
     fi
 
@@ -557,7 +557,7 @@ do_status() {
         echo "  Time remaining: ${mins}m ${secs}s"
     else
         echo -e "${YELLOW}Blocking: DISABLED${NC}"
-        echo "  Run 'ytblockctl enable <minutes>' to activate"
+        echo "  Run 'kblockerctl enable <minutes>' to activate"
     fi
     echo "  Blocked IPs: $count"
     echo "  Blocked domains: $domain_count"
@@ -572,7 +572,7 @@ do_status() {
         echo "  State: restored from disk"
     fi
 
-    KO_FILE="/lib/modules/$(uname -r)/extra/ytblock.ko"
+    KO_FILE="/lib/modules/$(uname -r)/extra/kblocker.ko"
     if [[ -f "$KO_FILE" ]]; then
         if command -v lsattr &>/dev/null; then
             local attrs
@@ -589,7 +589,7 @@ do_status() {
         echo "  Module file: MISSING"
     fi
 
-    MODULES_LOAD="/etc/modules-load.d/ytblock.conf"
+    MODULES_LOAD="/etc/modules-load.d/kblocker.conf"
     if [[ -f "$MODULES_LOAD" ]]; then
         if command -v lsattr &>/dev/null; then
             local attrs
@@ -620,7 +620,7 @@ do_status() {
             echo "    Recipient: $fp"
         done
     else
-        echo "    Type: in-kernel hash (read via: ytblockctl key)"
+        echo "    Type: in-kernel hash (read via: kblockerctl key)"
     fi
 }
 
@@ -687,7 +687,7 @@ domains+=("$domain")
 
 	kernel_update_hosts
 
-	echo "Added $domain. Run 'ytblockctl enable' to activate."
+	echo "Added $domain. Run 'kblockerctl enable' to activate."
 }
 
 do_remove() {
@@ -759,7 +759,7 @@ do_block_ip() {
 
 do_list() {
     if ! module_loaded; then
-        echo "ytblock: NOT LOADED"
+        echo "kblocker: NOT LOADED"
         exit 0
     fi
 
@@ -794,7 +794,7 @@ do_key() {
     fi
 
     if [[ -n "$hex_key" ]]; then
-        echo "ytblock unload key: $hex_key"
+        echo "kblocker unload key: $hex_key"
         echo ""
     fi
 
@@ -813,8 +813,8 @@ do_key() {
         done
     else
         echo "No PGP keys registered."
-        echo "  Add with: ytblockctl add-pgp <pubkey.asc>"
-        echo "  Or use:   ytblockctl enable --insecure"
+        echo "  Add with: kblockerctl add-pgp <pubkey.asc>"
+        echo "  Or use:   kblockerctl enable --insecure"
     fi
 
     if [[ -d "$PGP_ENC_DIR" ]]; then
@@ -961,7 +961,7 @@ do_pgp_cipher() {
 
     if [[ -z "$needle" ]]; then
         echo "Error: specify a PGP key fingerprint (or prefix)." >&2
-        echo "Usage: ytblockctl pgp-cipher <fingerprint>" >&2
+        echo "Usage: kblockerctl pgp-cipher <fingerprint>" >&2
         exit 1
     fi
 
@@ -993,7 +993,7 @@ do_crash() {
     requires_root
     require_module
 
-    echo "Force-removing ytblock module. This will trigger a kernel panic."
+    echo "Force-removing kblocker module. This will trigger a kernel panic."
     echo "System will crash and require a reboot."
     echo ""
     echo -n "Are you sure? (yes/NO): "

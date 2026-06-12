@@ -1,4 +1,4 @@
-# ytblock
+# kblocker
 
 A kernel-level self-discipline internet blocker. Once enabled, it blocks access to configured domains by dropping matching TCP connections via netfilter and redirecting DNS to 0.0.0.0/:: in `/etc/hosts`. Cannot be disabled or unloaded without the correct key — and with PGP mode, the key is encrypted to trusted recipients' public keys, then erased from kernel memory.
 
@@ -18,44 +18,44 @@ You want to block distracting sites (YouTube, Reddit, etc.) and make it *genuine
 sudo make install
 
 # block YouTube for 60 minutes (requires PGP unless --insecure)
-sudo ytblockctl enable 60
+sudo kblockerctl enable 60
 
 # check status
-sudo ytblockctl status
+sudo kblockerctl status
 
 # disable blocking (module stays loaded)
-sudo ytblockctl unblock
+sudo kblockerctl unblock
 
 # remove module entirely
-sudo ytblockctl unload
+sudo kblockerctl unload
 ```
 
 ## PGP mode
 
-Without PGP, the unload key is readable from `/sys/kernel/ytblock/key` — anyone with root can retrieve it and disable the blocker. PGP mode encrypts the key to trusted recipients so that:
+Without PGP, the unload key is readable from `/sys/kernel/kblocker/key` — anyone with root can retrieve it and disable the blocker. PGP mode encrypts the key to trusted recipients so that:
 
-1. On `enable`, ytblockctl reads the key from sysfs, GPG-encrypts it for all registered public keys, and signals the kernel to zero the key from memory
+1. On `enable`, kblockerctl reads the key from sysfs, GPG-encrypts it for all registered public keys, and signals the kernel to zero the key from memory
 2. The `key` sysfs attribute returns `"encrypted"` instead of the raw hex
 3. `unblock` and `unload` require the decrypted key (PGP-decrypt the ciphertext, write the plain hex to the kernel)
 
 ```sh
 # register a PGP public key
-sudo ytblockctl add-pgp alice.pub
+sudo kblockerctl add-pgp alice.pub
 
 # enable with PGP protection
-sudo ytblockctl enable 60
+sudo kblockerctl enable 60
 
 # disable (needs PGP private key to decrypt)
-sudo ytblockctl unblock
+sudo kblockerctl unblock
 
 # unload (needs the key too)
-sudo ytblockctl unload
+sudo kblockerctl unload
 ```
 
 Without any key registered, `--insecure` mode prints the key to stdout instead:
 
 ```sh
-sudo ytblockctl enable 60 --insecure
+sudo kblockerctl enable 60 --insecure
 ```
 
 ## Commands
@@ -85,17 +85,17 @@ sudo ytblockctl enable 60 --insecure
 ┌─────────────────────────────────────────────────────┐
 │                    Userspace                         │
 │                                                      │
-│  ytblockctl                                             │
+│  kblockerctl                                             │
 │      │ writes                                        │
 │      ▼                                               │
-│  /sys/kernel/ytblock/{enabled,blocked_ips,           │
+│  /sys/kernel/kblocker/{enabled,blocked_ips,           │
 │                        blocked_domains,unblock,      │
 │                        disable,pgp_active,...}        │
 │                                                      │
-│  PGP keys: /etc/ytblock/keys/                        │
-│  Ciphertexts: /var/lib/ytblock/unlock-pgp/           │
-│  Persisted state: /var/lib/ytblock/state             │
-│  Domain config: /etc/ytblock/domains.conf            │
+│  PGP keys: /etc/kblocker/keys/                        │
+│  Ciphertexts: /var/lib/kblocker/unlock-pgp/           │
+│  Persisted state: /var/lib/kblocker/state             │
+│  Domain config: /etc/kblocker/domains.conf            │
 └──────────────────────┬──────────────────────────────┘
                        │ sysfs
 ┌──────────────────────▼──────────────────────────────┐
@@ -107,8 +107,8 @@ sudo ytblockctl enable 60 --insecure
 │    └─ TLS ECH (0xFE0A) drop to force SNI fallback    │
 │                                                      │
 │  File protection (inode_operations override + immut) │
-│    ├─ ytblock.ko                                     │
-│    └─ /etc/modules-load.d/ytblock.conf               │
+│    ├─ kblocker.ko                                     │
+│    └─ /etc/modules-load.d/kblocker.conf               │
 │                                                      │
 │  Key management                                      │
 │    ├─ 128-bit random key at module init              │

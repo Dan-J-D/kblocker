@@ -4,7 +4,7 @@
 # Usage: fakeroot make -f debian/rules binary
 
 KERNEL_VER := $(shell uname -r)
-PKG_DIR   := $(CURDIR)/debian/ytblock
+PKG_DIR   := $(CURDIR)/debian/kblocker
 DEB_DIR   := $(PKG_DIR)/DEBIAN
 
 all: build
@@ -15,14 +15,11 @@ build:
 
 install: build
 	install -d $(PKG_DIR)/lib/modules/$(KERNEL_VER)/extra
-	install -m 644 ytblock.ko $(PKG_DIR)/lib/modules/$(KERNEL_VER)/extra/
+	install -m 644 kblocker.ko $(PKG_DIR)/lib/modules/$(KERNEL_VER)/extra/
 	install -d $(PKG_DIR)/usr/local/bin
-	install -m 755 ytblockctl $(PKG_DIR)/usr/local/bin/ytblockctl
-	install -d $(PKG_DIR)/lib/systemd/system
-	install -m 644 ytblock-refresh.service $(PKG_DIR)/lib/systemd/system/
-	install -m 644 ytblock-refresh.timer $(PKG_DIR)/lib/systemd/system/
-	install -d $(PKG_DIR)/etc/ytblock/keys
-	install -d $(PKG_DIR)/var/lib/ytblock
+	install -m 755 kblockerctl $(PKG_DIR)/usr/local/bin/kblockerctl
+	install -d $(PKG_DIR)/etc/kblocker/keys
+	install -d $(PKG_DIR)/var/lib/kblocker
 	install -d $(DEB_DIR)
 	install -m 644 debian/control $(DEB_DIR)/control
 	install -m 644 debian/changelog $(DEB_DIR)/changelog
@@ -33,13 +30,13 @@ install: build
 	install -m 755 debian/postrm $(DEB_DIR)/postrm
 
 binary: install
-	dpkg-deb --root-owner-group --build $(PKG_DIR) $(CURDIR)/ytblock_$(KERNEL_VER).deb
+	dpkg-deb --root-owner-group --build $(PKG_DIR) $(CURDIR)/kblocker_$(KERNEL_VER).deb
 	@echo ""
-	@echo "Package: ytblock_$(KERNEL_VER).deb"
-	@echo "Install: sudo dpkg -i ytblock_$(KERNEL_VER).deb"
+	@echo "Package: kblocker_$(KERNEL_VER).deb"
+	@echo "Install: sudo dpkg -i kblocker_$(KERNEL_VER).deb"
 
 clean:
 	$(MAKE) -C /lib/modules/$(KERNEL_VER)/build M=$(CURDIR) clean
 	rm -f src/*.o src/*.ko src/*.mod.c Module.symvers modules.order
 	rm -rf $(PKG_DIR)
-	rm -f ytblock_*.deb
+	rm -f kblocker_*.deb

@@ -14,20 +14,20 @@ fi
 echo "==> Building kernel module..."
 make -C /lib/modules/$KERNEL_VER/build M=$PWD modules
 
-PKG_DIR="$PWD/debian/ytblock"
+PKG_DIR="$PWD/debian/kblocker"
 DEB_DIR="$PKG_DIR/DEBIAN"
 
 echo "==> Staging package files..."
 rm -rf "$PKG_DIR"
 
 install -d "$PKG_DIR/lib/modules/$KERNEL_VER/extra"
-install -m 644 ytblock.ko "$PKG_DIR/lib/modules/$KERNEL_VER/extra/"
+install -m 644 kblocker.ko "$PKG_DIR/lib/modules/$KERNEL_VER/extra/"
 
 install -d "$PKG_DIR/usr/local/bin"
-install -m 755 ytblockctl "$PKG_DIR/usr/local/bin/ytblockctl"
+install -m 755 kblockerctl "$PKG_DIR/usr/local/bin/kblockerctl"
 
-install -d "$PKG_DIR/etc/ytblock/keys"
-install -d "$PKG_DIR/var/lib/ytblock"
+install -d "$PKG_DIR/etc/kblocker/keys"
+install -d "$PKG_DIR/var/lib/kblocker"
 
 BUILD_DIR="$PWD/build"
 mkdir -p "$BUILD_DIR"
@@ -46,7 +46,7 @@ install -m 755 debian/postrm "$DEB_DIR/postrm"
 BUILD_DIR="$PWD/build"
 mkdir -p "$BUILD_DIR"
 
-DEB_FILE="$BUILD_DIR/ytblock_$KERNEL_VER.deb"
+DEB_FILE="$BUILD_DIR/kblocker_$KERNEL_VER.deb"
 echo "==> Building package..."
 fakeroot dpkg-deb --root-owner-group --build "$PKG_DIR" "$DEB_FILE"
 

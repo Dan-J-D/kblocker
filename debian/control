@@ -1,13 +1,13 @@
-Package: ytblock
+Package: kblocker
 Version: 1.0-1
 Architecture: ARCH
-Maintainer: ytblock maintainer <root@localhost>
+Maintainer: kblocker maintainer <root@localhost>
 Depends: gnupg, e2fsprogs, xxd
 Recommends: perl
 Section: kernel
 Priority: optional
 Description: Self-discipline internet blocker kernel module
- ytblock is a Linux kernel module that blocks network access
+ kblocker is a Linux kernel module that blocks network access
  to user-configured domains and IPs for a time-limited period.
  .
  Designed as a focus tool: once enabled, it is deliberately
@@ -15,4 +15,4 @@ Description: Self-discipline internet blocker kernel module
  so a trusted remote party can authorize unblocking.
  .
  Blocking is disabled by default after installation.
- Use 'ytblockctl enable <minutes>' to activate.
+ Use 'kblockerctl enable <minutes>' to activate.
