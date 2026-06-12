@@ -91,11 +91,21 @@ module_loaded() {
 }
 
 require_module() {
-    if ! module_loaded; then
-        echo "Error: ytblock module not loaded." >&2
-        echo "Run 'sudo modprobe $MODULE' or 'sudo make install' first." >&2
-        exit 1
-    fi
+	if ! module_loaded; then
+		echo "Error: ytblock module not loaded." >&2
+		echo "Run 'sudo modprobe $MODULE' or 'sudo make install' first." >&2
+		exit 1
+	fi
+}
+
+require_disabled() {
+	local state
+	state=$(cat "$SYSFS_BASE/enabled" 2>/dev/null | awk '{print $1}')
+	if [[ "$state" == "1" ]]; then
+		echo -e "${RED}Error: cannot modify domains while blocking is active.${NC}" >&2
+		echo "  Disable first: ytblockctl disable" >&2
+		exit 1
+	fi
 }
 
 resolve_to_ips() {
@@ -107,79 +117,6 @@ resolve_to_ips() {
         fi
     done < <(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u)
     echo "${ips[@]}"
-}
-
-update_hosts() {
-    local domains=("$@")
-    local hosts_file="/etc/hosts"
-    local tmp_file=$(mktemp /etc/.hosts.XXXXXX)
-
-    if [[ -z "$tmp_file" || ! -f "$tmp_file" ]]; then
-        echo -e "${RED}Error: could not create temp file${NC}" >&2
-        return 1
-    fi
-
-    if [[ -f "$hosts_file" ]]; then
-        cp "$hosts_file" "$tmp_file"
-    fi
-
-    if grep -q "$HOSTS_MARKER" "$tmp_file" 2>/dev/null; then
-        sed -i "/$HOSTS_MARKER/,/^$/d" "$tmp_file"
-    fi
-
-    echo "" >> "$tmp_file"
-    echo "$HOSTS_MARKER" >> "$tmp_file"
-    for domain in "${domains[@]}"; do
-        echo "0.0.0.0 $domain" >> "$tmp_file"
-        echo ":: $domain" >> "$tmp_file"
-        echo "0.0.0.0 www.$domain" >> "$tmp_file"
-        echo ":: www.$domain" >> "$tmp_file"
-    done
-    echo "" >> "$tmp_file"
-
-    chmod 644 "$tmp_file"
-    if command -v chattr &>/dev/null; then
-        chattr -i "$hosts_file" 2>/dev/null || true
-    fi
-    if mv "$tmp_file" "$hosts_file" 2>/dev/null; then
-        if command -v chattr &>/dev/null; then
-            chattr +i "$hosts_file" 2>/dev/null || true
-        fi
-    else
-        cp "$tmp_file" "$hosts_file" 2>/dev/null || {
-            echo -e "${YELLOW}Warning: could not update /etc/hosts${NC}" >&2
-        }
-        rm -f "$tmp_file"
-    fi
-}
-
-clear_hosts() {
-    local hosts_file="/etc/hosts"
-    local tmp_file=$(mktemp /etc/.hosts.XXXXXX)
-
-    if [[ -z "$tmp_file" || ! -f "$tmp_file" ]]; then
-        return 1
-    fi
-
-    cp "$hosts_file" "$tmp_file"
-
-    if grep -q "$HOSTS_MARKER" "$tmp_file"; then
-        sed -i "/$HOSTS_MARKER/,/^$/d" "$tmp_file"
-        if command -v chattr &>/dev/null; then
-            chattr -i "$hosts_file" 2>/dev/null || true
-        fi
-        if mv "$tmp_file" "$hosts_file" 2>/dev/null; then
-            echo "Cleared ytblock entries from /etc/hosts"
-            return 0
-        fi
-        if cp "$tmp_file" "$hosts_file" 2>/dev/null; then
-            echo "Cleared ytblock entries from /etc/hosts"
-            rm -f "$tmp_file"
-            return 0
-        fi
-    fi
-
-    rm -f "$tmp_file"
 }
 
 write_ips_to_sysfs() {
@@ -209,16 +146,21 @@ read_configured_domains() {
 }
 
 save_domains() {
-    local domains=("$@")
-    mkdir -p /etc/ytblock
-    if command -v chattr &>/dev/null; then
-        chattr -i /etc/ytblock/domains.conf 2>/dev/null || true
-    fi
-    printf '%s\n' "${domains[@]}" > "$BLOCKED_DOMAINS_FILE"
-    chmod 644 "$BLOCKED_DOMAINS_FILE"
-    if command -v chattr &>/dev/null; then
-        chattr +i "$BLOCKED_DOMAINS_FILE" 2>/dev/null || true
-    fi
+	local domains=("$@")
+	mkdir -p /etc/ytblock
+	if command -v chattr &>/dev/null; then
+		chattr -i /etc/ytblock/domains.conf 2>/dev/null || true
+	fi
+	printf '%s\n' "${domains[@]}" > "$BLOCKED_DOMAINS_FILE"
+	chmod 644 "$BLOCKED_DOMAINS_FILE"
+	if command -v chattr &>/dev/null; then
+		chattr +i "$BLOCKED_DOMAINS_FILE" 2>/dev/null || true
+	fi
+}
+
+kernel_update_hosts() {
+	echo 1 > "$SYSFS_BASE/update_hosts" 2>/dev/null || \
+		echo -e "${YELLOW}Warning: could not update /etc/hosts via kernel${NC}" >&2
 }
 
 # --- Key management ---
@@ -326,6 +268,23 @@ store_state() {
     fi
     echo "key_hash:$hash_hex" > "$STATE_FILE"
     echo "expiry:$expiry" >> "$STATE_FILE"
+
+    local domains
+    domains=$(cat "$SYSFS_BASE/blocked_domains" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+    if [[ -n "$domains" ]]; then
+        echo "domains:$domains" >> "$STATE_FILE"
+    fi
+
+    local ips
+    ips=$(cat "$SYSFS_BASE/blocked_ips" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+    if [[ -n "$ips" ]]; then
+        echo "blocked_ips:$ips" >> "$STATE_FILE"
+    fi
+
+    local pgp
+    pgp=$(cat "$SYSFS_BASE/pgp_active" 2>/dev/null || echo 0)
+    echo "pgp_active:$pgp" >> "$STATE_FILE"
+
     chmod 600 "$STATE_FILE"
     return 0
 }
@@ -365,17 +324,24 @@ do_enable() {
     fi
 
     local domains=($(read_configured_domains))
-    if [[ ${#domains[@]} -gt 0 ]]; then
-        echo -e "${CYAN}Writing ${#domains[@]} domains to kernel...${NC}"
-        write_domains_to_sysfs "${domains[@]}"
-        update_hosts "${domains[@]}"
-    fi
+if [[ ${#domains[@]} -gt 0 ]]; then
+		echo -e "${CYAN}Writing ${#domains[@]} domains to kernel...${NC}"
+		write_domains_to_sysfs "${domains[@]}"
+		kernel_update_hosts
+	fi
+
+    # Try to enable in kernel FIRST — fails if PGP active and already enabled
+    echo "$((minutes * 60))" > "$SYSFS_BASE/enabled" 2>/dev/null || {
+        echo -e "${RED}Failed to enable blocking${NC}" >&2
+        echo "  If PGP mode is active, disable first: ytblockctl unblock" >&2
+        exit 1
+    }
 
     local hex_key
     hex_key=$(read_key_from_sysfs)
 
     if [[ -z "$hex_key" ]]; then
-        hex_key=$(dmesg 2>/dev/null | grep "ytblock: loaded" | tail -1 | sed 's/.*key: //')
+        hex_key=$(dmesg 2>/dev/null | grep "unload key:" | tail -1 | sed 's/.*key: //')
     fi
 
     if [[ -z "$hex_key" ]]; then
@@ -383,6 +349,7 @@ do_enable() {
     else
         if ! $insecure; then
             if store_key_pgp "$hex_key"; then
+                echo 1 > "$SYSFS_BASE/pgp_active" 2>/dev/null || true
                 :
             else
                 echo -e "${RED}No PGP keys registered.${NC}"
@@ -402,11 +369,6 @@ do_enable() {
         fi
     fi
 
-    echo "$((minutes * 60))" > "$SYSFS_BASE/enabled" 2>/dev/null || {
-        echo -e "${RED}Failed to enable blocking${NC}" >&2
-        exit 1
-    }
-
     if ! $insecure && [[ -n "$hex_key" ]]; then
         local expiry
         expiry=$(state_expiry "$minutes")
@@ -422,9 +384,8 @@ do_disable() {
     requires_root
     require_module
 
-    echo "0" > "$SYSFS_BASE/enabled" 2>/dev/null || true
-    clear_hosts
-    rm -f "$STATE_FILE"
+echo "0" > "$SYSFS_BASE/enabled" 2>/dev/null || true
+	rm -f "$STATE_FILE"
 
     echo -e "${GREEN}Blocking disabled. Module still loaded.${NC}"
 }
@@ -445,14 +406,15 @@ do_block() {
     fi
 
     require_module
+    require_disabled
 
     echo -e "${CYAN}Writing ${#domains[@]} domains to kernel module...${NC}"
-    write_domains_to_sysfs "${domains[@]}"
+	write_domains_to_sysfs "${domains[@]}"
 
-    echo -e "${CYAN}Updating /etc/hosts...${NC}"
-    update_hosts "${domains[@]}"
+	echo -e "${CYAN}Updating /etc/hosts via kernel...${NC}"
+	kernel_update_hosts
 
-    echo -e "${CYAN}Saving domain configuration...${NC}"
+	echo -e "${CYAN}Saving domain configuration...${NC}"
     save_domains "${domains[@]}"
 
     echo -e "${GREEN}Configured ${#domains[@]} domains. Run 'ytblockctl enable' to activate.${NC}"
@@ -461,15 +423,44 @@ do_block() {
 do_unblock() {
     requires_root
 
-    if module_loaded; then
-        echo "0" > "$SYSFS_BASE/enabled" 2>/dev/null || true
+    if ! module_loaded; then
+        echo "Module not loaded."
+        exit 0
     fi
 
-    clear_hosts
+    local provided_key=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --key|-k) shift; provided_key="$1"; shift ;;
+            *) shift ;;
+        esac
+    done
 
-    if ! module_loaded; then
-        echo "Module not loaded. Hosts cleaned."
-        exit 0
+    local pgp_on
+    pgp_on=$(cat "$SYSFS_BASE/pgp_active" 2>/dev/null || echo 0)
+
+    if [[ "$pgp_on" == "1" ]]; then
+        local key="$provided_key"
+        if [[ -z "$key" ]]; then
+            key=$(pgp_decrypt_key "$PGP_ENC_DIR") || true
+        fi
+        if [[ -n "$key" ]]; then
+            echo -e "${GREEN}Key verified via PGP${NC}"
+        fi
+
+        if [[ -z "$key" ]]; then
+            echo -e "${RED}PGP mode active — unblock requires the unload key.${NC}" >&2
+            echo "  Provide it via --key <hex> or ensure PGP-encrypted" >&2
+            echo "  key is available in $PGP_ENC_DIR" >&2
+            exit 1
+        fi
+
+        printf '%s' "$key" > "$SYSFS_BASE/disable" 2>/dev/null || {
+            echo -e "${RED}Failed to authorize disable. Invalid key?${NC}" >&2
+            exit 1
+        }
+    else
+        echo "0" > "$SYSFS_BASE/enabled" 2>/dev/null || true
     fi
 
     echo -e "${GREEN}Blocking disabled. Module still loaded.${NC}"
@@ -497,7 +488,7 @@ do_unload() {
 
         if [[ -z "$key" ]]; then
             echo -e "${YELLOW}Unload key not found. Checking dmesg...${NC}"
-            key=$(dmesg 2>/dev/null | grep "ytblock: loaded" | tail -1 | sed 's/.*key: //')
+            key=$(dmesg 2>/dev/null | grep "unload key:" | tail -1 | sed 's/.*key: //')
             if [[ -z "$key" ]]; then
                 echo -e "${RED}Could not find unload key.${NC}" >&2
                 echo "  Provide it via --key <hex> or ensure the PGP-encrypted"
@@ -507,9 +498,6 @@ do_unload() {
             fi
         fi
     fi
-
-    # Clean hosts entries and remove immutability before module removal
-    clear_hosts
 
     echo -e "${CYAN}Authorizing module unload...${NC}"
     printf '%s' "$key" > "$SYSFS_BASE/unblock" 2>/dev/null || {
@@ -638,10 +626,13 @@ do_reload() {
         exit 1
     fi
 
-    echo -e "${CYAN}Re-writing ${#domains[@]} domains to kernel module...${NC}"
-    write_domains_to_sysfs "${domains[@]}"
+echo -e "${CYAN}Re-writing ${#domains[@]} domains to kernel module...${NC}"
+	write_domains_to_sysfs "${domains[@]}"
 
-    # Refresh PGP ciphertexts if keys are registered (handles new key after reboot)
+	echo -e "${CYAN}Updating /etc/hosts via kernel...${NC}"
+	kernel_update_hosts
+
+	# Refresh PGP ciphertexts if keys are registered (handles new key after reboot)
     local num_pgp
     num_pgp=$(pgp_count "$PGP_KEY_DIR")
     if [[ "$num_pgp" -gt 0 ]]; then
@@ -650,6 +641,7 @@ do_reload() {
         if [[ -n "$hex_key" ]]; then
             echo -e "${CYAN}Refreshing PGP ciphertexts for $num_pgp keys...${NC}"
             pgp_encrypt_key "$hex_key" "$PGP_KEY_DIR" "$PGP_ENC_DIR"
+            echo 1 > "$SYSFS_BASE/pgp_active" 2>/dev/null || true
         fi
     fi
 
@@ -664,6 +656,7 @@ do_reload() {
 do_add() {
     requires_root
     require_module
+    require_disabled
 
     local domain="$1"
     if [[ -z "$domain" ]]; then
@@ -679,19 +672,20 @@ do_add() {
         fi
     done
 
-    domains+=("$domain")
-    save_domains "${domains[@]}"
+domains+=("$domain")
+	save_domains "${domains[@]}"
 
-    write_domains_to_sysfs "${domains[@]}"
+	write_domains_to_sysfs "${domains[@]}"
 
-    update_hosts "${domains[@]}"
+	kernel_update_hosts
 
-    echo "Added $domain. Run 'ytblockctl enable' to activate."
+	echo "Added $domain. Run 'ytblockctl enable' to activate."
 }
 
 do_remove() {
     requires_root
     require_module
+    require_disabled
 
     local domain="$1"
     if [[ -z "$domain" ]]; then
@@ -715,21 +709,23 @@ do_remove() {
         exit 0
     fi
 
-    save_domains "${new_domains[@]}"
-    update_hosts "${new_domains[@]}"
+save_domains "${new_domains[@]}"
 
-    if [[ ${#new_domains[@]} -eq 0 ]]; then
-        echo "" > "$SYSFS_BASE/blocked_domains" 2>/dev/null || true
-    else
-        write_domains_to_sysfs "${new_domains[@]}"
-    fi
+	if [[ ${#new_domains[@]} -eq 0 ]]; then
+		echo "" > "$SYSFS_BASE/blocked_domains" 2>/dev/null || true
+	else
+		write_domains_to_sysfs "${new_domains[@]}"
+	fi
 
-    echo "Removed $domain."
+	kernel_update_hosts
+
+	echo "Removed $domain."
 }
 
 do_block_ip() {
     requires_root
     require_module
+    require_disabled
 
     local ips=("$@")
     if [[ ${#ips[@]} -eq 0 ]]; then
@@ -782,7 +778,7 @@ do_key() {
     hex_key=$(read_key_from_sysfs 2>/dev/null || true)
 
     if [[ -z "$hex_key" ]]; then
-        hex_key=$(dmesg 2>/dev/null | grep "ytblock: loaded" | tail -1 | sed 's/.*key: //')
+        hex_key=$(dmesg 2>/dev/null | grep "unload key:" | tail -1 | sed 's/.*key: //')
     fi
 
     if [[ -z "$hex_key" ]]; then
@@ -869,7 +865,7 @@ do_add_pgp() {
         local hex_key
         hex_key=$(read_key_from_sysfs 2>/dev/null || true)
         if [[ -z "$hex_key" ]]; then
-            hex_key=$(dmesg 2>/dev/null | grep "ytblock: loaded" | tail -1 | sed 's/.*key: //')
+            hex_key=$(dmesg 2>/dev/null | grep "unload key:" | tail -1 | sed 's/.*key: //')
         fi
         if [[ -n "$hex_key" ]]; then
             echo -e "${CYAN}Encrypting existing key for new recipient...${NC}"

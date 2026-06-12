@@ -26,15 +26,16 @@ install -m 644 ytblock.ko "$PKG_DIR/lib/modules/$KERNEL_VER/extra/"
 install -d "$PKG_DIR/usr/local/bin"
 install -m 755 ytblockctl "$PKG_DIR/usr/local/bin/ytblockctl"
 
-install -d "$PKG_DIR/lib/systemd/system"
-install -m 644 ytblock-refresh.service "$PKG_DIR/lib/systemd/system/"
-install -m 644 ytblock-refresh.timer "$PKG_DIR/lib/systemd/system/"
-
 install -d "$PKG_DIR/etc/ytblock/keys"
 install -d "$PKG_DIR/var/lib/ytblock"
 
+BUILD_DIR="$PWD/build"
+mkdir -p "$BUILD_DIR"
+
+ARCH=$(dpkg --print-architecture)
+
 install -d "$DEB_DIR"
-install -m 644 debian/control "$DEB_DIR/control"
+sed 's/ARCH/'"$ARCH"'/g' debian/control > "$DEB_DIR/control"
 install -m 644 debian/changelog "$DEB_DIR/changelog"
 gzip -9nf "$DEB_DIR/changelog"
 install -m 644 debian/copyright "$DEB_DIR/copyright"

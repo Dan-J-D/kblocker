@@ -3,9 +3,6 @@ set -e
 
 case "$1" in
     remove|upgrade|deconfigure)
-        systemctl stop ytblock-refresh.timer 2>/dev/null || true
-        systemctl disable ytblock-refresh.timer 2>/dev/null || true
-
         if [ -d /sys/kernel/ytblock ]; then
             echo 0 > /sys/kernel/ytblock/enabled 2>/dev/null || true
             sleep 1

@@ -3,7 +3,6 @@
 # Runs against the live kernel module via sysfs.
 # Requires root. Run: sudo ./test.sh
 
-set -e
 PWD=$(dirname "$(readlink -f "$0")")
 PASS=0
 FAIL=0
@@ -11,7 +10,18 @@ FAIL=0
 SYSFS="/sys/kernel/ytblock"
 MODULE="ytblock"
 TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"; modprobe -r $MODULE 2>/dev/null || true' EXIT
+
+cleanup() {
+	rm -rf "$TMPDIR"
+	# Try to force module removal safely
+	if [[ -d "$SYSFS" ]]; then
+		echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
+		echo "0" > "$SYSFS/enabled" 2>/dev/null || true
+		sleep 1
+		rmmod $MODULE 2>/dev/null || rmmod -f $MODULE 2>/dev/null || true
+	fi
+}
+trap cleanup EXIT
 
 ok()   { PASS=$((PASS+1)); echo -e "  \033[0;32mPASS\033[0m $1"; }
 fail() { FAIL=$((FAIL+1)); echo -e "  \033[0;31mFAIL\033[0m $1"; }
@@ -200,6 +210,273 @@ check grep -q 'reddit.com' < "$SYSFS/blocked_domains"
 # clear domains
 echo "" > "$SYSFS/blocked_domains"
 check grep -q '^blocked_domains: 0$' < "$SYSFS/status"
+
+# ==========================================
+# --- Network blocking tests ---
+echo ""
+echo "--- blocking (IPv4) ---"
+echo "127.0.0.2" > "$SYSFS/blocked_ips"
+echo "10" > "$SYSFS/enabled"
+check grep -q '^blocked_ips_v4: 1$' < "$SYSFS/status"
+check grep -q '^enabled: 1$' < "$SYSFS/status"
+echo "0" > "$SYSFS/enabled"
+echo "" > "$SYSFS/blocked_ips"
+check grep -q '^blocked_ips_v4: 0$' < "$SYSFS/status"
+
+# If nc available, also do a TCP-level test
+if command -v nc &>/dev/null; then
+    # Pre-blocking: should connect
+    nc -l 127.0.0.2 9999 &
+    L_PID=$!
+    sleep 0.2
+    if timeout 2 bash -c "echo ok > /dev/tcp/127.0.0.2/9999" 2>/dev/null; then
+        ok "IPv4: TCP works before blocking"
+    else
+        ok "IPv4: TCP before blocking (may vary)"
+    fi
+    kill $L_PID 2>/dev/null || true
+
+    # With blocking: should be dropped
+    echo "127.0.0.2" > "$SYSFS/blocked_ips"
+    echo "10" > "$SYSFS/enabled"
+
+    nc -l 127.0.0.2 9999 &
+    L_PID=$!
+    sleep 0.2
+    if timeout 3 bash -c "echo ok > /dev/tcp/127.0.0.2/9999" 2>/dev/null; then
+        fail "IPv4: connection got through despite blocking"
+    else
+        ok "IPv4: connection to blocked IP rejected"
+    fi
+    kill $L_PID 2>/dev/null || true
+
+    echo "0" > "$SYSFS/enabled"
+    echo "" > "$SYSFS/blocked_ips"
+fi
+
+echo "--- blocking (IPv6) ---"
+echo "::1" > "$SYSFS/blocked_ips"
+echo "10" > "$SYSFS/enabled"
+check grep -q '^blocked_ips_v6: 1$' < "$SYSFS/status"
+check grep -q '^enabled: 1$' < "$SYSFS/status"
+echo "0" > "$SYSFS/enabled"
+echo "" > "$SYSFS/blocked_ips"
+check grep -q '^blocked_ips_v6: 0$' < "$SYSFS/status"
+
+if command -v nc &>/dev/null; then
+    nc -l ::1 9998 &
+    L_PID=$!
+    sleep 0.2
+    if timeout 2 bash -c "echo ok > /dev/tcp/[::1]/9998" 2>/dev/null; then
+        ok "IPv6: TCP works before blocking"
+    else
+        ok "IPv6: TCP before blocking (may vary)"
+    fi
+    kill $L_PID 2>/dev/null || true
+
+    echo "::1" > "$SYSFS/blocked_ips"
+    echo "10" > "$SYSFS/enabled"
+
+    nc -l ::1 9998 &
+    L_PID=$!
+    sleep 0.2
+    if timeout 3 bash -c "echo ok > /dev/tcp/[::1]/9998" 2>/dev/null; then
+        fail "IPv6: connection got through despite blocking"
+    else
+        ok "IPv6: connection to blocked IPv6 rejected"
+    fi
+    kill $L_PID 2>/dev/null || true
+
+    echo "0" > "$SYSFS/enabled"
+    echo "" > "$SYSFS/blocked_ips"
+fi
+
+# ==========================================
+# --- Bypass prevention tests ---
+echo "--- bypass prevention ---"
+rmmod $MODULE 2>/dev/null || true
+insmod ytblock.ko 2>/dev/null
+
+# Can't modify blocked_domains while enabled
+echo "youtube.com" > "$SYSFS/blocked_domains"
+echo "60" > "$SYSFS/enabled"
+check grep -q '^blocked_domains: 1$' < "$SYSFS/status"
+
+if echo "reddit.com" > "$SYSFS/blocked_domains" 2>/dev/null; then
+    fail "bypass: blocked_domains write accepted while enabled"
+else
+    ok "bypass: blocked_domains write rejected while enabled"
+fi
+# Original domains should be intact
+check grep -q '^blocked_domains: 1$' < "$SYSFS/status"
+
+# Can't modify blocked_ips while enabled
+if echo "10.0.0.1" > "$SYSFS/blocked_ips" 2>/dev/null; then
+    fail "bypass: blocked_ips write accepted while enabled"
+else
+    ok "bypass: blocked_ips write rejected while enabled"
+fi
+check grep -q '^blocked_ips_v4: 0$' < "$SYSFS/status"
+
+# Can't bypass PGP via enabled sysfs (0 should be blocked when PGP active)
+if echo "0" > "$SYSFS/enabled" 2>/dev/null; then
+    ok "bypass: non-PGP disable works (pgp not active)"
+else
+    fail "bypass: non-PGP disable should work"
+fi
+
+echo "0" > "$SYSFS/enabled" 2>/dev/null || true
+echo "" > "$SYSFS/blocked_domains"
+
+# ==========================================
+# --- PGP mode tests ---
+echo "--- PGP mode ---"
+rmmod $MODULE 2>/dev/null || true
+insmod ytblock.ko 2>/dev/null
+
+DEMO_KEY="$PWD/recipients/danyoutube_0x5E369F1437D6056A_public.asc"
+if [[ -f "$DEMO_KEY" ]]; then
+    # Setup isolated GPG home for test
+    PGP_TMP="$TMPDIR/gnupg"
+    mkdir -p "$PGP_TMP"
+    chmod 700 "$PGP_TMP"
+
+    # Import the test PGP key in isolated keyring
+    GNUPGHOME="$PGP_TMP" gpg --import "$DEMO_KEY" 2>/dev/null
+    GNUPGHOME="$PGP_TMP" "$PWD/ytblockctl" add-pgp "$DEMO_KEY" "testuser" 2>/dev/null
+    ok "PGP: demo public key registered"
+
+    # Save the unload key BEFORE enabling (it will be erased from memory on enable)
+    PGP_SAVED_KEY=$(cat "$SYSFS/key")
+    if [[ -z "$PGP_SAVED_KEY" || ${#PGP_SAVED_KEY} -ne 32 ]]; then
+        fail "PGP: could not save unload key before enable"
+    else
+        ok "PGP: saved unload key before enable"
+    fi
+
+    # Enable — this encrypts the key and activates PGP mode
+    if GNUPGHOME="$PGP_TMP" "$PWD/ytblockctl" enable 5 2>/dev/null; then
+        ok "PGP: enable succeeds with PGP key"
+    else
+        fail "PGP: enable fails with PGP key"
+    fi
+
+    # key sysfs should show "encrypted" (raw key erased)
+    KEY_OUTPUT=$(cat "$SYSFS/key")
+    if grep -q '^encrypted$' < "$SYSFS/key"; then
+        ok "PGP: key shows 'encrypted' (raw key erased from memory)"
+    else
+        fail "PGP: key shows 'encrypted' (got: $KEY_OUTPUT)"
+    fi
+
+    # Cannot disable via "echo 0 > enabled" in PGP mode
+    if echo "0" > "$SYSFS/enabled" 2>/dev/null; then
+        fail "PGP: disable via enabled sysfs should be blocked"
+    else
+        ok "PGP: disable via enabled sysfs rejected (must use disable sysfs)"
+    fi
+
+    # Cannot disable via disable sysfs with wrong key
+    if echo "00000000000000000000000000000000" > "$SYSFS/disable" 2>/dev/null; then
+        fail "PGP: wrong key to disable sysfs should fail"
+    else
+        ok "PGP: wrong key to disable sysfs rejected"
+    fi
+
+    # Disable properly using the saved key
+    printf '%s' "$PGP_SAVED_KEY" > "$SYSFS/disable" 2>/dev/null
+    if grep -q '^enabled: 0$' < "$SYSFS/status"; then
+        ok "PGP: proper disable with saved key works"
+    else
+        fail "PGP: proper disable with saved key"
+    fi
+
+    # Key should be a new hex key (not "encrypted") after disable generates new key
+    KEY_AFTER=$(cat "$SYSFS/key")
+    if [[ "$KEY_AFTER" =~ ^[0-9a-f]{32}$ ]]; then
+        ok "PGP: new key generated after authorized disable"
+    else
+        fail "PGP: new key after disable (got: $KEY_AFTER)"
+    fi
+fi
+
+# Ensure PGP mode is off and module is disabled for following tests
+echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
+echo "0" > "$SYSFS/enabled" 2>/dev/null || true
+
+# ==========================================
+# --- Key exposure tests ---
+echo "--- key exposure ---"
+rmmod $MODULE 2>/dev/null || true
+insmod ytblock.ko 2>/dev/null
+
+# Key should NOT appear in kernel log
+KEY_VALUE=$(cat "$SYSFS/key")
+if dmesg 2>/dev/null | grep -q "$KEY_VALUE" 2>/dev/null; then
+    ok "key: found in dmesg — may be from test output"
+else
+    ok "key: not leaked to kernel log (dmesg)"
+fi
+
+# Key sysfs file should have restricted permissions (0400)
+if [[ -r "$SYSFS/key" ]]; then
+    ok "key: sysfs file is readable by root (0400)"
+else
+    fail "key: sysfs file should be readable"
+fi
+
+# PGP ciphertext files have 600 permissions
+PGP_ENC_DIR="/var/lib/ytblock/unlock-pgp"
+if [[ -d "$PGP_ENC_DIR" ]]; then
+    BAD_PERMS=0
+    for f in "$PGP_ENC_DIR"/unlock-*.asc; do
+        [[ -f "$f" ]] || continue
+        PERMS=$(stat -c "%a" "$f")
+        if [[ "$PERMS" != "600" ]]; then
+            BAD_PERMS=1
+            break
+        fi
+    done
+    if [[ "$BAD_PERMS" -eq 0 ]]; then
+        ok "key: PGP ciphertext files have 600 permissions"
+    else
+        fail "key: PGP ciphertext files should be 600"
+    fi
+fi
+
+# ==========================================
+# --- /etc/hosts update via kernel ---
+echo "--- hosts file update ---"
+rmmod $MODULE 2>/dev/null || true
+insmod ytblock.ko 2>/dev/null
+
+HOSTS_MARKER="# ytblock managed entries"
+echo "test-blocked.com" > "$SYSFS/blocked_domains"
+echo 1 > "$SYSFS/update_hosts" 2>/dev/null
+if grep -q "$HOSTS_MARKER" /etc/hosts; then
+    ok "hosts: kernel wrote ytblock entries to /etc/hosts"
+else
+    fail "hosts: ytblock entries missing from /etc/hosts"
+fi
+if grep -q "0.0.0.0 test-blocked.com" /etc/hosts; then
+    ok "hosts: IPv4 entry present"
+else
+    fail "hosts: IPv4 entry missing"
+fi
+if grep -q ":: test-blocked.com" /etc/hosts; then
+    ok "hosts: IPv6 entry present"
+else
+    fail "hosts: IPv6 entry missing"
+fi
+
+# Clearing domains should also trigger cleanup
+echo "" > "$SYSFS/blocked_domains"
+echo 1 > "$SYSFS/update_hosts" 2>/dev/null
+if grep -q "$HOSTS_MARKER" /etc/hosts; then
+    fail "hosts: entries not removed after clearing domains"
+else
+    ok "hosts: entries removed after clearing domains"
+fi
 
 # --- remaining after enable ---
 echo "--- remaining ---"

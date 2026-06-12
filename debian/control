@@ -1,6 +1,6 @@
 Package: ytblock
 Version: 1.0-1
-Architecture: linux-any
+Architecture: ARCH
 Maintainer: ytblock maintainer <root@localhost>
 Depends: gnupg, e2fsprogs, xxd
 Recommends: perl

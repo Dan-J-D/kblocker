@@ -74,6 +74,7 @@ static unsigned long expiry_jiffies;
 static struct timer_list enable_timer;
 static bool enable_timer_active;
 static atomic_t ref_taken = ATOMIC_INIT(0);
+static bool pgp_active;
 
 static struct work_struct yt_disable_work;
 static struct work_struct yt_protect_work;
@@ -371,7 +372,6 @@ static unsigned int ytblock_hook_v6(unsigned int hooknum, struct sk_buff *skb,
 }
 #endif
 
-static void reset_blocked_conns(void);
 static void enable_blocking(unsigned int seconds);
 static void do_disable_work(struct work_struct *work);
 
@@ -381,6 +381,13 @@ static void enable_timer_cb(struct timer_list *t)
 		return;
 
 	if (ktime_get_real_seconds() >= expiry_seconds) {
+		WRITE_ONCE(enabled, false);
+		expiry_jiffies = 0;
+		expiry_seconds = 0;
+		WRITE_ONCE(state_restored, false);
+		if (atomic_xchg(&ref_taken, 0))
+			module_put(THIS_MODULE);
+		printk(KERN_INFO "ytblock: timer-expired, disabling\n");
 		schedule_work(&yt_disable_work);
 		return;
 	}
@@ -399,7 +406,6 @@ static void enable_blocking(unsigned int seconds)
 	if (!atomic_xchg(&ref_taken, 1)) {
 		__module_get(THIS_MODULE);
 	}
-	reset_blocked_conns();
 	printk(KERN_INFO "ytblock: enabled for %u seconds\n", seconds);
 }
 
@@ -432,123 +438,109 @@ static void log_blocklist_on_disable(void)
 	}
 }
 
-static void reset_blocked_conns(void)
+#define HOSTS_MARKER "# ytblock managed entries - do not edit manually"
+#define HOSTS_MAX_SIZE (1024 * 1024)
+#define STATE_FILE "/var/lib/ytblock/state"
+
+static int hosts_clear_immutable(void)
 {
-	int slot, reset = 0;
-	struct inet_hashinfo *hinfo;
-	struct sock *match_list[64];
+	struct path kp;
+	struct inode *inode;
+	int was_set = 0;
 
-	if (!READ_ONCE(blocked_count_v4) && !READ_ONCE(blocked_count_v6))
-		return;
+	if (kern_path("/etc/hosts", 0, &kp))
+		return 0;
 
-	hinfo = tcp_prot.h.hashinfo;
-
-	for (slot = 0; slot <= hinfo->ehash_mask; slot++) {
-		struct inet_ehash_bucket *head = &hinfo->ehash[slot];
-		struct sock *sk;
-		struct hlist_nulls_node *node;
-		int n_match = 0;
-
-		spin_lock_bh(&hinfo->ehash_locks[slot & hinfo->ehash_locks_mask]);
-		sk_nulls_for_each(sk, node, &head->chain) {
-			bool blocked = false;
-
-			if (sk->sk_family == AF_INET)
-				blocked = is_ip_blocked(inet_sk(sk)->inet_daddr);
-#if IS_ENABLED(CONFIG_IPV6)
-			else if (sk->sk_family == AF_INET6)
-				blocked = is_ipv6_blocked(&sk->sk_v6_daddr);
-#endif
-			if (blocked) {
-				sock_hold(sk);
-				if (n_match < ARRAY_SIZE(match_list))
-					match_list[n_match++] = sk;
-				else {
-					sock_put(sk);
-					printk(KERN_WARNING "ytblock: match_list overflow, skipping\n");
-				}
-			}
+	inode = d_inode(kp.dentry);
+	if (inode) {
+		inode_lock(inode);
+		if (inode->i_flags & S_IMMUTABLE) {
+			was_set = 1;
+			inode_set_flags(inode, 0, S_IMMUTABLE);
 		}
-		spin_unlock_bh(&hinfo->ehash_locks[slot & hinfo->ehash_locks_mask]);
-
-		for (int i = 0; i < n_match; i++) {
-			sk = match_list[i];
-			if (sk->sk_family == AF_INET) {
-				struct inet_sock *inet = inet_sk(sk);
-				tcp_done(sk);
-				reset++;
-				printk(KERN_INFO "ytblock: reset TCP %pI4:%d -> %pI4:%d\n",
-				       &inet->inet_saddr, ntohs(inet->inet_sport),
-				       &inet->inet_daddr, ntohs(inet->inet_dport));
-			}
-#if IS_ENABLED(CONFIG_IPV6)
-			else if (sk->sk_family == AF_INET6) {
-				tcp_done(sk);
-				reset++;
-				printk(KERN_INFO "ytblock: reset TCP6 [%pI6c]:%d -> [%pI6c]:%d\n",
-				       &sk->sk_v6_rcv_saddr, ntohs(inet_sk(sk)->inet_sport),
-				       &sk->sk_v6_daddr, ntohs(inet_sk(sk)->inet_dport));
-			}
-#endif
-			sock_put(sk);
-		}
+		inode_unlock(inode);
 	}
-
-	if (reset)
-		printk(KERN_INFO "ytblock: reset %d blocked TCP connections\n", reset);
+	path_put(&kp);
+	return was_set;
 }
 
-#define HOSTS_MARKER "# ytblock managed entries - do not edit manually"
+static char *hosts_read_all(struct file *f, loff_t *out_len)
+{
+	loff_t size = i_size_read(file_inode(f));
+	char *buf;
+	ssize_t ret;
+
+	if (size <= 0 || size > HOSTS_MAX_SIZE)
+		return NULL;
+
+	buf = kmalloc(size + 1, GFP_KERNEL);
+	if (!buf)
+		return NULL;
+
+	ret = kernel_read(f, buf, size, &(loff_t){0});
+	if (ret <= 0) {
+		kfree(buf);
+		return NULL;
+	}
+	buf[ret] = '\0';
+	*out_len = ret;
+	return buf;
+}
 
 static void clear_hosts_from_kernel(void)
 {
 	struct file *file;
 	struct path kp;
 	struct inode *inode;
-	loff_t pos;
 	char *buf, *out, *p;
-	ssize_t len, out_len;
+	loff_t len;
+	ssize_t out_len;
 
 	WRITE_ONCE(ytblock_bypass_protection, true);
 
+	hosts_clear_immutable();
 	file = filp_open("/etc/hosts", O_RDWR, 0);
 	if (IS_ERR(file)) {
 		WRITE_ONCE(ytblock_bypass_protection, false);
 		return;
 	}
 
-	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	buf = hosts_read_all(file, &len);
 	if (!buf) {
 		filp_close(file, NULL);
 		WRITE_ONCE(ytblock_bypass_protection, false);
 		return;
 	}
 
-	pos = 0;
-	len = kernel_read(file, buf, PAGE_SIZE - 1, &pos);
-	if (len <= 0)
-		goto close;
-
-	buf[len] = '\0';
-
 	p = strstr(buf, HOSTS_MARKER);
-	if (!p)
-		goto close;
+	if (!p) {
+		printk(KERN_INFO "ytblock: clear_hosts: marker not found, nothing to clear\n");
+		kfree(buf);
+		filp_close(file, NULL);
+		WRITE_ONCE(ytblock_bypass_protection, false);
+		return;
+	}
+	printk(KERN_INFO "ytblock: clear_hosts: found marker at offset %ld\n", p - buf);
 
 	out_len = p - buf;
 	while (out_len > 0 && buf[out_len - 1] == '\n')
 		out_len--;
+
 	out = kmalloc(out_len + 2, GFP_KERNEL);
-	if (!out)
-		goto close;
+	if (!out) {
+		kfree(buf);
+		filp_close(file, NULL);
+		WRITE_ONCE(ytblock_bypass_protection, false);
+		return;
+	}
 
 	memcpy(out, buf, out_len);
 	out[out_len] = '\n';
 	out_len++;
 	out[out_len] = '\0';
 
-	pos = 0;
-	kernel_write(file, out, out_len, &pos);
+	hosts_clear_immutable();
+	kernel_write(file, out, out_len, &(loff_t){0});
 
 	if (!kern_path("/etc/hosts", 0, &kp)) {
 		inode = d_inode(kp.dentry);
@@ -556,43 +548,158 @@ static void clear_hosts_from_kernel(void)
 			inode_lock(inode);
 			if (inode->i_flags & S_IMMUTABLE)
 				inode_set_flags(inode, 0, S_IMMUTABLE);
+			inode_unlock(inode);
 			vfs_truncate(&kp, out_len);
+		}
+		path_put(&kp);
+	}
+
+	kfree(out);
+	kfree(buf);
+	filp_close(file, NULL);
+
+	printk(KERN_INFO "ytblock: cleared hosts file entries\n");
+	WRITE_ONCE(ytblock_bypass_protection, false);
+}
+
+static int update_hosts_file(void)
+{
+	struct file *file;
+	struct path kp;
+	struct inode *inode;
+	char *buf = NULL, *out, *p;
+	loff_t len, base_len = 0;
+	ssize_t pos;
+	int i, ndom;
+	size_t out_size;
+
+	WRITE_ONCE(ytblock_bypass_protection, true);
+
+	hosts_clear_immutable();
+	file = filp_open("/etc/hosts", O_RDWR, 0);
+	if (IS_ERR(file)) {
+		int err = PTR_ERR(file);
+		printk(KERN_ERR "ytblock: filp_open /etc/hosts failed: %d\n", err);
+		WRITE_ONCE(ytblock_bypass_protection, false);
+		return err;
+	}
+
+	buf = hosts_read_all(file, &len);
+	if (buf) {
+		p = strstr(buf, HOSTS_MARKER);
+		if (p) {
+			base_len = p - buf;
+			while (base_len > 0 && buf[base_len - 1] == '\n')
+				base_len--;
+		} else {
+			base_len = len;
+			while (base_len > 0 && buf[base_len - 1] == '\n')
+				base_len--;
+		}
+	} else {
+		base_len = 0;
+	}
+
+	ndom = READ_ONCE(blocked_domain_count);
+	if (!ndom) {
+		kfree(buf);
+		filp_close(file, NULL);
+		clear_hosts_from_kernel();
+		return 0;
+	}
+
+	out_size = base_len + 2 + sizeof(HOSTS_MARKER) + 1;
+	for (i = 0; i < ndom; i++) {
+		int dlen = strlen(blocked_domains[i]);
+		out_size += dlen * 4 + 30;
+	}
+	out_size += 1;
+
+	out = kmalloc(out_size, GFP_KERNEL);
+	if (!out) {
+		kfree(buf);
+		filp_close(file, NULL);
+		WRITE_ONCE(ytblock_bypass_protection, false);
+		return -ENOMEM;
+	}
+
+	pos = 0;
+	memcpy(out, buf ? buf : "", base_len);
+	pos += base_len;
+	out[pos++] = '\n';
+	out[pos++] = '\n';
+	memcpy(out + pos, HOSTS_MARKER, sizeof(HOSTS_MARKER) - 1);
+	pos += sizeof(HOSTS_MARKER) - 1;
+	out[pos++] = '\n';
+
+	for (i = 0; i < ndom; i++) {
+		const char *d = blocked_domains[i];
+		pos += snprintf(out + pos, out_size - pos, "0.0.0.0 %s\n", d);
+		pos += snprintf(out + pos, out_size - pos, ":: %s\n", d);
+		pos += snprintf(out + pos, out_size - pos, "0.0.0.0 www.%s\n", d);
+		pos += snprintf(out + pos, out_size - pos, ":: www.%s\n", d);
+	}
+	out[pos++] = '\n';
+
+	kfree(buf);
+
+	hosts_clear_immutable();
+	kernel_write(file, out, pos, &(loff_t){0});
+
+	if (!kern_path("/etc/hosts", 0, &kp)) {
+		inode = d_inode(kp.dentry);
+		if (inode) {
+			inode_lock(inode);
+			if (inode->i_flags & S_IMMUTABLE)
+				inode_set_flags(inode, 0, S_IMMUTABLE);
+			inode_unlock(inode);
+			vfs_truncate(&kp, pos);
+			inode_lock(inode);
+			inode_set_flags(inode, S_IMMUTABLE, S_IMMUTABLE);
 			inode_unlock(inode);
 		}
 		path_put(&kp);
 	}
 
-	filp_close(file, NULL);
-	printk(KERN_INFO "ytblock: cleared hosts file entries\n");
 	kfree(out);
-close:
-	kfree(buf);
+	filp_close(file, NULL);
+
+	printk(KERN_INFO "ytblock: updated hosts file with %d domains\n", ndom);
 	WRITE_ONCE(ytblock_bypass_protection, false);
+	return 0;
 }
 
-static void do_disable_work(struct work_struct *work)
+static void do_disable_cleanup(void)
 {
 	log_blocklist_on_disable();
-	reset_blocked_conns();
 	clear_hosts_from_kernel();
 
 	if (READ_ONCE(enable_timer_active)) {
-		timer_delete_sync(&enable_timer);
+		timer_delete(&enable_timer);
 		WRITE_ONCE(enable_timer_active, false);
-	}
-	WRITE_ONCE(enabled, false);
-	expiry_jiffies = 0;
-	expiry_seconds = 0;
-	WRITE_ONCE(state_restored, false);
-	if (atomic_xchg(&ref_taken, 0)) {
-		module_put(THIS_MODULE);
 	}
 	printk(KERN_INFO "ytblock: disabled\n");
 }
 
+static void do_disable(void)
+{
+	WRITE_ONCE(enabled, false);
+	expiry_jiffies = 0;
+	expiry_seconds = 0;
+	WRITE_ONCE(state_restored, false);
+	if (atomic_xchg(&ref_taken, 0))
+		module_put(THIS_MODULE);
+	do_disable_cleanup();
+}
+
+static void do_disable_work(struct work_struct *work)
+{
+	do_disable_cleanup();
+}
+
 static void disable_blocking(void)
 {
-	schedule_work(&yt_disable_work);
+	do_disable();
 }
 
 static int ytblock_setattr_check(struct inode *inode, struct iattr *attr)
@@ -919,7 +1026,11 @@ static ssize_t enabled_store(struct kobject *kobj, struct kobj_attribute *attr,
 		return -EINVAL;
 
 	if (val == 0) {
+		if (READ_ONCE(pgp_active))
+			return -EPERM;
 		disable_blocking();
+	} else if (READ_ONCE(pgp_active) && READ_ONCE(enabled)) {
+		return -EPERM;
 	} else {
 		enable_blocking((unsigned int)val);
 	}
@@ -956,6 +1067,9 @@ static ssize_t blocked_ips_store(struct kobject *kobj, struct kobj_attribute *at
 	__be32 *tmp_v4;
 	struct in6_addr *tmp_v6;
 	int n4 = 0, n6 = 0;
+
+	if (READ_ONCE(enabled))
+		return -EPERM;
 
 	tmp_v4 = kmalloc_array(MAX_IPS_V4, sizeof(__be32), GFP_KERNEL);
 	tmp_v6 = kmalloc_array(MAX_IPS_V6, sizeof(struct in6_addr), GFP_KERNEL);
@@ -1018,6 +1132,9 @@ static ssize_t blocked_domains_store(struct kobject *kobj, struct kobj_attribute
 				     const char *buf, size_t count)
 {
 	char *copy, *orig, *token;
+
+	if (READ_ONCE(enabled))
+		return -EPERM;
 
 	copy = kmemdup(buf, count + 1, GFP_KERNEL);
 	if (!copy)
@@ -1118,12 +1235,170 @@ static ssize_t unload_key_show(struct kobject *kobj, struct kobj_attribute *attr
 	if (READ_ONCE(state_restored))
 		return sprintf(buf, "restored\n");
 
+	if (READ_ONCE(pgp_active))
+		return sprintf(buf, "encrypted\n");
+
 	char *p = buf;
 	int i;
 	for (i = 0; i < 16; i++)
 		p += sprintf(p, "%02x", unload_key[i]);
 	p += sprintf(p, "\n");
 	return p - buf;
+}
+
+static void do_restore(const u8 *hash, u64 expiry_ts)
+{
+	if (expiry_ts <= ktime_get_real_seconds()) {
+		printk(KERN_INFO "ytblock: restore skipped (already expired)\n");
+		return;
+	}
+
+	memcpy(key_hash, hash, 32);
+	WRITE_ONCE(state_restored, true);
+	WRITE_ONCE(allow_unload, false);
+
+	u64 delta = expiry_ts - ktime_get_real_seconds();
+	expiry_seconds = expiry_ts;
+	expiry_jiffies = jiffies + msecs_to_jiffies(delta * 1000);
+
+	WRITE_ONCE(enabled, true);
+	if (!atomic_xchg(&ref_taken, 1))
+		__module_get(THIS_MODULE);
+	mod_timer(&enable_timer, jiffies + HZ);
+	WRITE_ONCE(enable_timer_active, true);
+
+	printk(KERN_INFO "ytblock: state restored, %llu seconds remaining\n", delta);
+}
+
+static void try_restore_state_from_disk(void)
+{
+	struct file *file;
+	char *buf;
+	loff_t len;
+	u8 hash[32];
+	u64 expiry;
+	char *p, *end, saved;
+	bool restored = false;
+
+	file = filp_open(STATE_FILE, O_RDONLY, 0);
+	if (IS_ERR(file))
+		return;
+
+	buf = hosts_read_all(file, &len);
+	if (!buf) {
+		filp_close(file, NULL);
+		return;
+	}
+
+	p = strstr(buf, "key_hash:");
+	if (p) {
+		p += 9;
+		end = strchr(p, '\n');
+		if (end && (end - p) == 64) {
+			saved = *end;
+			*end = '\0';
+			if (!hex_decode(p, hash, 32)) {
+				p = strstr(buf, "expiry:");
+				if (p) {
+					p += 7;
+					expiry = simple_strtoull(p, &end, 0);
+					if (end != p) {
+						do_restore(hash, expiry);
+						restored = true;
+					}
+				}
+			}
+		}
+	}
+
+	p = strstr(buf, "domains:");
+	if (p) {
+		p += 8;
+		end = strchr(p, '\n');
+		if (end) {
+			char *copy, *token, *orig;
+			saved = *end;
+			*end = '\0';
+			copy = kstrdup(p, GFP_KERNEL);
+			if (copy) {
+				int nd = 0;
+				orig = copy;
+				spin_lock_bh(&ip_list_lock);
+				while ((token = strsep(&copy, ",")) && nd < MAX_DOMAINS) {
+					int dlen = strlen(token);
+					if (dlen > 0) {
+						if (dlen >= MAX_DOMAIN_LEN)
+							dlen = MAX_DOMAIN_LEN - 1;
+						memcpy(blocked_domains[nd], token, dlen);
+						blocked_domains[nd][dlen] = '\0';
+						nd++;
+					}
+				}
+				blocked_domain_count = nd;
+				spin_unlock_bh(&ip_list_lock);
+				kfree(orig);
+				if (nd > 0)
+					update_hosts_file();
+			}
+		}
+	}
+
+	p = strstr(buf, "blocked_ips:");
+	if (p) {
+		p += 12;
+		end = strchr(p, '\n');
+		if (end) {
+			char *copy, *token, *orig;
+			__be32 *tmp_v4;
+			struct in6_addr *tmp_v6;
+			int n4 = 0, n6 = 0;
+
+			saved = *end;
+			*end = '\0';
+			copy = kstrdup(p, GFP_KERNEL);
+			if (copy) {
+				tmp_v4 = kmalloc_array(MAX_IPS_V4, sizeof(__be32), GFP_KERNEL);
+				tmp_v6 = kmalloc_array(MAX_IPS_V6, sizeof(struct in6_addr), GFP_KERNEL);
+				if (tmp_v4 && tmp_v6) {
+					orig = copy;
+					while ((token = strsep(&copy, ","))) {
+						__be32 addr4;
+						struct in6_addr addr6;
+						if (token[0] == '\0') continue;
+						if (in6_pton(token, -1, (u8 *)&addr6, '\0', NULL)) {
+							if (n6 < MAX_IPS_V6)
+								tmp_v6[n6++] = addr6;
+						} else if (in4_pton(token, -1, (u8 *)&addr4, '\0', NULL)) {
+							if (n4 < MAX_IPS_V4)
+								tmp_v4[n4++] = addr4;
+						}
+					}
+					spin_lock_bh(&ip_list_lock);
+					memcpy(blocked_ips_v4, tmp_v4, n4 * sizeof(__be32));
+					memcpy(blocked_ips_v6, tmp_v6, n6 * sizeof(struct in6_addr));
+					WRITE_ONCE(blocked_count_v4, n4);
+					WRITE_ONCE(blocked_count_v6, n6);
+					spin_unlock_bh(&ip_list_lock);
+					kfree(orig);
+				}
+				kfree(tmp_v4);
+				kfree(tmp_v6);
+			}
+		}
+	}
+
+	p = strstr(buf, "pgp_active:");
+	if (p && restored) {
+		p += 11;
+		if (*p == '1') {
+			WRITE_ONCE(pgp_active, true);
+			memzero_explicit(unload_key, sizeof(unload_key));
+			printk(KERN_INFO "ytblock: PGP mode restored from disk\n");
+		}
+	}
+
+	kfree(buf);
+	filp_close(file, NULL);
 }
 
 static ssize_t restore_store(struct kobject *kobj, struct kobj_attribute *attr,
@@ -1146,28 +1421,105 @@ static ssize_t restore_store(struct kobject *kobj, struct kobj_attribute *attr,
 	parsed_expiry = simple_strtoull(delim + 1, &endpot, 0);
 	if (endpot == delim + 1) return -EINVAL;
 
-	if (parsed_expiry <= ktime_get_real_seconds()) {
-		printk(KERN_INFO "ytblock: restore skipped (already expired)\n");
+	do_restore(parsed_hash, parsed_expiry);
+	return count;
+}
+
+static ssize_t pgp_active_show(struct kobject *kobj, struct kobj_attribute *attr,
+			       char *buf)
+{
+	return sprintf(buf, "%d\n", READ_ONCE(pgp_active));
+}
+
+static ssize_t pgp_active_store(struct kobject *kobj, struct kobj_attribute *attr,
+			        const char *buf, size_t count)
+{
+	unsigned long val;
+	char *end;
+
+	val = simple_strtoul(buf, &end, 0);
+	if (end == buf)
+		return -EINVAL;
+
+	if (val) {
+		if (!READ_ONCE(pgp_active)) {
+			WRITE_ONCE(pgp_active, true);
+			memzero_explicit(unload_key, sizeof(unload_key));
+			WRITE_ONCE(state_restored, false);
+			printk(KERN_INFO "ytblock: PGP mode active, key erased from memory\n");
+		}
+	} else {
+		WRITE_ONCE(pgp_active, false);
+		printk(KERN_INFO "ytblock: PGP mode deactivated\n");
+	}
+
+	return count;
+}
+
+static void generate_unload_key(void);
+
+static ssize_t disable_store(struct kobject *kobj, struct kobj_attribute *attr,
+			     const char *buf, size_t count)
+{
+	if (!READ_ONCE(pgp_active)) {
+		disable_blocking();
 		return count;
 	}
 
-	memcpy(key_hash, parsed_hash, 32);
-	WRITE_ONCE(state_restored, true);
-	WRITE_ONCE(allow_unload, false);
+	u8 input_hash[32], parsed[16];
+	struct crypto_shash *tfm;
 
-	u64 delta = parsed_expiry - ktime_get_real_seconds();
-	expiry_seconds = parsed_expiry;
-	expiry_jiffies = jiffies + msecs_to_jiffies(delta * 1000);
+	if (count < 32) return -EINVAL;
+	if (hex_decode(buf, parsed, 16)) return -EINVAL;
 
-	WRITE_ONCE(enabled, true);
-	if (!atomic_xchg(&ref_taken, 1)) {
-		__module_get(THIS_MODULE);
+	tfm = crypto_alloc_shash("sha256", 0, 0);
+	if (IS_ERR(tfm))
+		return -ENOMEM;
+
+	SHASH_DESC_ON_STACK(desc, tfm);
+	desc->tfm = tfm;
+
+	if (!crypto_shash_digest(desc, parsed, 16, input_hash)) {
+		if (memcmp(input_hash, key_hash, 32) == 0) {
+			crypto_free_shash(tfm);
+			generate_unload_key();
+			WRITE_ONCE(pgp_active, false);
+			WRITE_ONCE(state_restored, false);
+			disable_blocking();
+			printk(KERN_INFO "ytblock: authorized disable, new key generated\n");
+			return count;
+		}
 	}
-	reset_blocked_conns();
-	mod_timer(&enable_timer, jiffies + HZ);
-	WRITE_ONCE(enable_timer_active, true);
 
-	printk(KERN_INFO "ytblock: state restored, %llu seconds remaining\n", delta);
+	crypto_free_shash(tfm);
+	printk(KERN_WARNING "ytblock: invalid disable key attempt\n");
+	return -EPERM;
+}
+
+static void generate_unload_key(void)
+{
+	get_random_bytes(unload_key, sizeof(unload_key));
+
+	{
+		struct crypto_shash *tfm = crypto_alloc_shash("sha256", 0, 0);
+		if (!IS_ERR(tfm)) {
+			SHASH_DESC_ON_STACK(desc, tfm);
+			desc->tfm = tfm;
+			if (crypto_shash_digest(desc, unload_key, 16, key_hash))
+				get_random_bytes(key_hash, sizeof(key_hash));
+			crypto_free_shash(tfm);
+		} else {
+			get_random_bytes(key_hash, sizeof(key_hash));
+		}
+	}
+}
+
+static ssize_t update_hosts_store(struct kobject *kobj, struct kobj_attribute *attr,
+				  const char *buf, size_t count)
+{
+	int ret = update_hosts_file();
+	if (ret)
+		printk(KERN_ERR "ytblock: update_hosts failed: %d\n", ret);
 	return count;
 }
 
@@ -1180,6 +1532,9 @@ static struct kobj_attribute block_count_attr = __ATTR_RO(block_count);
 static struct kobj_attribute unblock_attr = __ATTR_WO(unblock);
 static struct kobj_attribute key_attr = __ATTR(key, 0400, unload_key_show, NULL);
 static struct kobj_attribute restore_attr = __ATTR_WO(restore);
+static struct kobj_attribute pgp_active_attr = __ATTR_RW(pgp_active);
+static struct kobj_attribute disable_attr = __ATTR_WO(disable);
+static struct kobj_attribute update_hosts_attr = __ATTR_WO(update_hosts);
 
 static struct attribute *attrs[] = {
 	&status_attr.attr,
@@ -1191,6 +1546,9 @@ static struct attribute *attrs[] = {
 	&unblock_attr.attr,
 	&key_attr.attr,
 	&restore_attr.attr,
+	&pgp_active_attr.attr,
+	&disable_attr.attr,
+	&update_hosts_attr.attr,
 	NULL,
 };
 
@@ -1263,20 +1621,7 @@ static int __init ytblock_init(void)
 	blocked_count_v4 = 0;
 	blocked_count_v6 = 0;
 
-	get_random_bytes(unload_key, sizeof(unload_key));
-
-	{
-		struct crypto_shash *tfm = crypto_alloc_shash("sha256", 0, 0);
-		if (!IS_ERR(tfm)) {
-			SHASH_DESC_ON_STACK(desc, tfm);
-			desc->tfm = tfm;
-			if (crypto_shash_digest(desc, unload_key, 16, key_hash))
-				get_random_bytes(key_hash, sizeof(key_hash));
-			crypto_free_shash(tfm);
-		} else {
-			get_random_bytes(key_hash, sizeof(key_hash));
-		}
-	}
+	generate_unload_key();
 
 	ytblock_kobj = kobject_create_and_add("ytblock", kernel_kobj);
 	if (!ytblock_kobj) {
@@ -1322,8 +1667,9 @@ static int __init ytblock_init(void)
 	if (ret)
 		printk(KERN_WARNING "ytblock: file protection init failed\n");
 
-	printk(KERN_INFO "ytblock: loaded (disabled by default, unload key: %*phN)\n",
-	       16, unload_key);
+	try_restore_state_from_disk();
+
+	printk(KERN_INFO "ytblock: loaded (disabled by default, key available via /sys/kernel/ytblock/key)\n");
 	return 0;
 
 err:

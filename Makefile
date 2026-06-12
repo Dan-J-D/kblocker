@@ -35,12 +35,6 @@ install: all
 	install -d $(DESTDIR)/etc/ytblock
 	install -d $(DESTDIR)/etc/ytblock/keys
 	install -d $(DESTDIR)/var/lib/ytblock
-	install -d $(DESTDIR)/etc/systemd/system
-	install -m 644 ytblock-refresh.service $(DESTDIR)/etc/systemd/system/
-	install -m 644 ytblock-refresh.timer $(DESTDIR)/etc/systemd/system/
-	systemctl daemon-reload 2>/dev/null || true
-	systemctl enable ytblock-refresh.timer 2>/dev/null || true
-	systemctl start ytblock-refresh.timer 2>/dev/null || true
 	@KO_FILE="/lib/modules/$(shell uname -r)/extra/ytblock.ko"; \
 	if command -v chattr >/dev/null 2>&1; then \
 		chattr +i "$$KO_FILE" 2>/dev/null && echo "  File: immutable" || echo "  Warning: could not set immutable flag"; \
@@ -85,11 +79,6 @@ uninstall:
 			chattr -i "$$f" 2>/dev/null || true; \
 		fi; \
 	done
-	-systemctl stop ytblock-refresh.timer 2>/dev/null
-	-systemctl disable ytblock-refresh.timer 2>/dev/null
-	rm -f $(DESTDIR)/etc/systemd/system/ytblock-refresh.service
-	rm -f $(DESTDIR)/etc/systemd/system/ytblock-refresh.timer
-	-systemctl daemon-reload
 	rm -f $(DESTDIR)/etc/modules-load.d/ytblock.conf
 	rm -f $(DESTDIR)/usr/local/bin/ytblockctl
 	@KO_FILE="$(DESTDIR)/lib/modules/$(shell uname -r)/extra/ytblock.ko"; \
