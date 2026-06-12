@@ -13,6 +13,7 @@ TMPDIR=$(mktemp -d)
 
 cleanup() {
 	rm -rf "$TMPDIR"
+	chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
 	# Try to force module removal safely
 	if [[ -d "$SYSFS" ]]; then
 		echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
@@ -59,6 +60,46 @@ check grep -q '^blocked_domains: 0$' <<<"$STATUS"
 check grep -q '^remaining: 0$' <<<"$STATUS"
 check grep -q '^allow_unload: 0$' <<<"$STATUS"
 check grep -q '^protected_files:' <<<"$STATUS"
+
+# ==========================================
+# --- file protection ---
+echo "--- file protection ---"
+
+KO_FILE="/lib/modules/$(uname -r)/extra/ytblock.ko"
+if [[ -f "$KO_FILE" ]] && command -v lsattr &>/dev/null; then
+    ATTRS=$(lsattr "$KO_FILE" 2>/dev/null | awk '{print $1}')
+    if echo "$ATTRS" | grep -q 'i'; then
+        ok "protection: ytblock.ko is immutable"
+    fi
+fi
+if [[ -f "$KO_FILE" ]]; then
+    if echo "x" > "$KO_FILE" 2>/dev/null; then
+        fail "protection: ytblock.ko write should be rejected"
+    else
+        ok "protection: ytblock.ko write rejected"
+    fi
+fi
+
+CFG_FILE="/etc/modules-load.d/ytblock.conf"
+if [[ -f "$CFG_FILE" ]] && command -v lsattr &>/dev/null; then
+    ATTRS=$(lsattr "$CFG_FILE" 2>/dev/null | awk '{print $1}')
+    if echo "$ATTRS" | grep -q 'i'; then
+        ok "protection: ytblock.conf is immutable"
+    fi
+fi
+if [[ -f "$CFG_FILE" ]]; then
+    if echo "x" > "$CFG_FILE" 2>/dev/null; then
+        fail "protection: ytblock.conf write should be rejected"
+    else
+        ok "protection: ytblock.conf write rejected"
+    fi
+fi
+
+if echo "x" >> /etc/hosts 2>/dev/null; then
+    fail "protection: /etc/hosts write should be rejected"
+else
+    ok "protection: /etc/hosts write rejected"
+fi
 
 # --- key ---
 echo "--- key ---"
@@ -408,6 +449,7 @@ echo "0" > "$SYSFS/enabled" 2>/dev/null || true
 # --- Key exposure tests ---
 echo "--- key exposure ---"
 rmmod $MODULE 2>/dev/null || true
+chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
 insmod ytblock.ko 2>/dev/null
 
 # Key should NOT appear in kernel log
@@ -448,6 +490,7 @@ fi
 # --- /etc/hosts update via kernel ---
 echo "--- hosts file update ---"
 rmmod $MODULE 2>/dev/null || true
+chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
 insmod ytblock.ko 2>/dev/null
 
 HOSTS_MARKER="# ytblock managed entries"
@@ -507,6 +550,8 @@ else
 fi
 
 # Re-insert for clean unload test
+rmmod -f $MODULE 2>/dev/null || true
+chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
 insmod ytblock.ko 2>/dev/null
 
 # --- clean unload via unblock path ---
@@ -562,11 +607,14 @@ else
     fail "remaining ~300s after restore (got ${REM}s)"
 fi
 # disable + unload cleanly
-echo "0" > "$SYSFS/enabled"
+echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
+echo "0" > "$SYSFS/enabled" 2>/dev/null || true
+sleep 1
 rmmod $MODULE 2>/dev/null || rmmod -f $MODULE 2>/dev/null || true
 
 # --- already-expired restore should be rejected ---
 echo "--- restore (already expired) ---"
+chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
 insmod "$PWD/ytblock.ko" 2>/dev/null
 EXPIRED=$(( $(date -u +%s) - 60 ))
 printf '%s:%s' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$EXPIRED" > "$SYSFS/restore" 2>/dev/null

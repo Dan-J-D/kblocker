@@ -266,6 +266,9 @@ store_state() {
         echo -e "${YELLOW}Warning: could not compute key hash for state persistence${NC}" >&2
         return 1
     fi
+    if command -v chattr &>/dev/null; then
+        chattr -i "$STATE_FILE" 2>/dev/null || true
+    fi
     echo "key_hash:$hash_hex" > "$STATE_FILE"
     echo "expiry:$expiry" >> "$STATE_FILE"
 
@@ -281,11 +284,10 @@ store_state() {
         echo "blocked_ips:$ips" >> "$STATE_FILE"
     fi
 
-    local pgp
-    pgp=$(cat "$SYSFS_BASE/pgp_active" 2>/dev/null || echo 0)
-    echo "pgp_active:$pgp" >> "$STATE_FILE"
-
     chmod 600 "$STATE_FILE"
+    if command -v chattr &>/dev/null; then
+        chattr +i "$STATE_FILE" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -385,6 +387,9 @@ do_disable() {
     require_module
 
 echo "0" > "$SYSFS_BASE/enabled" 2>/dev/null || true
+	if command -v chattr &>/dev/null; then
+		chattr -i "$STATE_FILE" 2>/dev/null || true
+	fi
 	rm -f "$STATE_FILE"
 
     echo -e "${GREEN}Blocking disabled. Module still loaded.${NC}"
@@ -510,6 +515,9 @@ do_unload() {
         rmmod -f "$MODULE" 2>/dev/null || true
     }
 
+    if command -v chattr &>/dev/null; then
+        chattr -i "$STATE_FILE" 2>/dev/null || true
+    fi
     rm -f "$STATE_FILE"
     rm -rf "$PGP_ENC_DIR"
     # Remove immutability before removing domains.conf

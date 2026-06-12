@@ -469,6 +469,7 @@ static char *hosts_read_all(struct file *f, loff_t *out_len)
 	loff_t size = i_size_read(file_inode(f));
 	char *buf;
 	ssize_t ret;
+	loff_t pos = 0;
 
 	if (size <= 0 || size > HOSTS_MAX_SIZE)
 		return NULL;
@@ -477,7 +478,7 @@ static char *hosts_read_all(struct file *f, loff_t *out_len)
 	if (!buf)
 		return NULL;
 
-	ret = kernel_read(f, buf, size, &(loff_t){0});
+	ret = kernel_read(f, buf, size, &pos);
 	if (ret <= 0) {
 		kfree(buf);
 		return NULL;
@@ -495,6 +496,7 @@ static void clear_hosts_from_kernel(void)
 	char *buf, *out, *p;
 	loff_t len;
 	ssize_t out_len;
+	loff_t pos = 0;
 
 	WRITE_ONCE(ytblock_bypass_protection, true);
 
@@ -540,7 +542,7 @@ static void clear_hosts_from_kernel(void)
 	out[out_len] = '\0';
 
 	hosts_clear_immutable();
-	kernel_write(file, out, out_len, &(loff_t){0});
+	kernel_write(file, out, out_len, &pos);
 
 	if (!kern_path("/etc/hosts", 0, &kp)) {
 		inode = d_inode(kp.dentry);
@@ -572,6 +574,7 @@ static int update_hosts_file(void)
 	ssize_t pos;
 	int i, ndom;
 	size_t out_size;
+	loff_t zero = 0;
 
 	WRITE_ONCE(ytblock_bypass_protection, true);
 
@@ -600,8 +603,10 @@ static int update_hosts_file(void)
 		base_len = 0;
 	}
 
-	ndom = READ_ONCE(blocked_domain_count);
+	spin_lock_bh(&ip_list_lock);
+	ndom = blocked_domain_count;
 	if (!ndom) {
+		spin_unlock_bh(&ip_list_lock);
 		kfree(buf);
 		filp_close(file, NULL);
 		clear_hosts_from_kernel();
@@ -613,6 +618,7 @@ static int update_hosts_file(void)
 		int dlen = strlen(blocked_domains[i]);
 		out_size += dlen * 4 + 30;
 	}
+	spin_unlock_bh(&ip_list_lock);
 	out_size += 1;
 
 	out = kmalloc(out_size, GFP_KERNEL);
@@ -632,6 +638,8 @@ static int update_hosts_file(void)
 	pos += sizeof(HOSTS_MARKER) - 1;
 	out[pos++] = '\n';
 
+	spin_lock_bh(&ip_list_lock);
+	ndom = blocked_domain_count;
 	for (i = 0; i < ndom; i++) {
 		const char *d = blocked_domains[i];
 		pos += snprintf(out + pos, out_size - pos, "0.0.0.0 %s\n", d);
@@ -639,12 +647,13 @@ static int update_hosts_file(void)
 		pos += snprintf(out + pos, out_size - pos, "0.0.0.0 www.%s\n", d);
 		pos += snprintf(out + pos, out_size - pos, ":: www.%s\n", d);
 	}
+	spin_unlock_bh(&ip_list_lock);
 	out[pos++] = '\n';
 
 	kfree(buf);
 
 	hosts_clear_immutable();
-	kernel_write(file, out, pos, &(loff_t){0});
+	kernel_write(file, out, pos, &zero);
 
 	if (!kern_path("/etc/hosts", 0, &kp)) {
 		inode = d_inode(kp.dentry);
@@ -922,6 +931,7 @@ static int setup_file_protection(void)
 		 "/lib/modules/%s/extra/ytblock.ko", utsname()->release);
 	add_protected_file(ko_path);
 	add_protected_file("/etc/modules-load.d/ytblock.conf");
+	add_protected_file("/etc/hosts");
 
 	timer_setup(&protect_timer, protect_callback, 0);
 	mod_timer(&protect_timer,
@@ -1277,8 +1287,7 @@ static void try_restore_state_from_disk(void)
 	loff_t len;
 	u8 hash[32];
 	u64 expiry;
-	char *p, *end, saved;
-	bool restored = false;
+	char *p, *end;
 
 	file = filp_open(STATE_FILE, O_RDONLY, 0);
 	if (IS_ERR(file))
@@ -1294,18 +1303,13 @@ static void try_restore_state_from_disk(void)
 	if (p) {
 		p += 9;
 		end = strchr(p, '\n');
-		if (end && (end - p) == 64) {
-			saved = *end;
-			*end = '\0';
-			if (!hex_decode(p, hash, 32)) {
-				p = strstr(buf, "expiry:");
-				if (p) {
-					p += 7;
-					expiry = simple_strtoull(p, &end, 0);
-					if (end != p) {
-						do_restore(hash, expiry);
-						restored = true;
-					}
+		if (end && (end - p) == 64 && !hex_decode(p, hash, 32)) {
+			p = strstr(buf, "expiry:");
+			if (p) {
+				p += 7;
+				expiry = simple_strtoull(p, &end, 0);
+				if (end != p) {
+					do_restore(hash, expiry);
 				}
 			}
 		}
@@ -1315,14 +1319,12 @@ static void try_restore_state_from_disk(void)
 	if (p) {
 		p += 8;
 		end = strchr(p, '\n');
-		if (end) {
-			char *copy, *token, *orig;
-			saved = *end;
-			*end = '\0';
-			copy = kstrdup(p, GFP_KERNEL);
+		if (end && end > p) {
+			char *copy = kstrdup(p, GFP_KERNEL);
 			if (copy) {
+				char *token, *orig = copy;
 				int nd = 0;
-				orig = copy;
+				copy[end - p] = '\0';
 				spin_lock_bh(&ip_list_lock);
 				while ((token = strsep(&copy, ",")) && nd < MAX_DOMAINS) {
 					int dlen = strlen(token);
@@ -1347,30 +1349,24 @@ static void try_restore_state_from_disk(void)
 	if (p) {
 		p += 12;
 		end = strchr(p, '\n');
-		if (end) {
-			char *copy, *token, *orig;
-			__be32 *tmp_v4;
-			struct in6_addr *tmp_v6;
-			int n4 = 0, n6 = 0;
-
-			saved = *end;
-			*end = '\0';
-			copy = kstrdup(p, GFP_KERNEL);
+		if (end && end > p) {
+			char *copy = kstrdup(p, GFP_KERNEL);
 			if (copy) {
-				tmp_v4 = kmalloc_array(MAX_IPS_V4, sizeof(__be32), GFP_KERNEL);
-				tmp_v6 = kmalloc_array(MAX_IPS_V6, sizeof(struct in6_addr), GFP_KERNEL);
+				char *token, *orig = copy;
+				__be32 *tmp_v4 = kmalloc_array(MAX_IPS_V4, sizeof(__be32), GFP_KERNEL);
+				struct in6_addr *tmp_v6 = kmalloc_array(MAX_IPS_V6, sizeof(struct in6_addr), GFP_KERNEL);
+				int n4 = 0, n6 = 0;
+
+				copy[end - p] = '\0';
 				if (tmp_v4 && tmp_v6) {
-					orig = copy;
 					while ((token = strsep(&copy, ","))) {
 						__be32 addr4;
 						struct in6_addr addr6;
 						if (token[0] == '\0') continue;
 						if (in6_pton(token, -1, (u8 *)&addr6, '\0', NULL)) {
-							if (n6 < MAX_IPS_V6)
-								tmp_v6[n6++] = addr6;
+							if (n6 < MAX_IPS_V6) tmp_v6[n6++] = addr6;
 						} else if (in4_pton(token, -1, (u8 *)&addr4, '\0', NULL)) {
-							if (n4 < MAX_IPS_V4)
-								tmp_v4[n4++] = addr4;
+							if (n4 < MAX_IPS_V4) tmp_v4[n4++] = addr4;
 						}
 					}
 					spin_lock_bh(&ip_list_lock);
@@ -1379,16 +1375,16 @@ static void try_restore_state_from_disk(void)
 					WRITE_ONCE(blocked_count_v4, n4);
 					WRITE_ONCE(blocked_count_v6, n6);
 					spin_unlock_bh(&ip_list_lock);
-					kfree(orig);
 				}
 				kfree(tmp_v4);
 				kfree(tmp_v6);
+				kfree(orig);
 			}
 		}
 	}
 
 	p = strstr(buf, "pgp_active:");
-	if (p && restored) {
+	if (p && READ_ONCE(state_restored)) {
 		p += 11;
 		if (*p == '1') {
 			WRITE_ONCE(pgp_active, true);
@@ -1621,8 +1617,6 @@ static int __init ytblock_init(void)
 	blocked_count_v4 = 0;
 	blocked_count_v6 = 0;
 
-	generate_unload_key();
-
 	ytblock_kobj = kobject_create_and_add("ytblock", kernel_kobj);
 	if (!ytblock_kobj) {
 		kfree(blocked_ips_v4);
@@ -1668,6 +1662,22 @@ static int __init ytblock_init(void)
 		printk(KERN_WARNING "ytblock: file protection init failed\n");
 
 	try_restore_state_from_disk();
+
+	if (!READ_ONCE(state_restored)) {
+		get_random_bytes(unload_key, sizeof(unload_key));
+		{
+			struct crypto_shash *tfm = crypto_alloc_shash("sha256", 0, 0);
+			if (!IS_ERR(tfm)) {
+				SHASH_DESC_ON_STACK(desc, tfm);
+				desc->tfm = tfm;
+				if (crypto_shash_digest(desc, unload_key, 16, key_hash))
+					get_random_bytes(key_hash, sizeof(key_hash));
+				crypto_free_shash(tfm);
+			} else {
+				get_random_bytes(key_hash, sizeof(key_hash));
+			}
+		}
+	}
 
 	printk(KERN_INFO "ytblock: loaded (disabled by default, key available via /sys/kernel/ytblock/key)\n");
 	return 0;
