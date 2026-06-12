@@ -139,6 +139,31 @@ write_domains_to_sysfs() {
     rm -f "$tmp_file"
 }
 
+read_kernel_domains() {
+    if [[ ! -d "$SYSFS_BASE" ]]; then
+        return
+    fi
+    cat "$SYSFS_BASE/blocked_domains" 2>/dev/null | grep -v '^$' || true
+}
+
+sync_config_from_kernel() {
+    local domains
+    domains=$(read_kernel_domains)
+    mkdir -p /etc/kblocker
+    if command -v chattr &>/dev/null; then
+        chattr -i /etc/kblocker/domains.conf 2>/dev/null || true
+    fi
+    if [[ -n "$domains" ]]; then
+        printf '%s\n' "$domains" > "$BLOCKED_DOMAINS_FILE"
+    else
+        : > "$BLOCKED_DOMAINS_FILE"
+    fi
+    chmod 644 "$BLOCKED_DOMAINS_FILE"
+    if command -v chattr &>/dev/null; then
+        chattr +i "$BLOCKED_DOMAINS_FILE" 2>/dev/null || true
+    fi
+}
+
 read_configured_domains() {
     if [[ -f "$BLOCKED_DOMAINS_FILE" ]]; then
         grep -v '^#' "$BLOCKED_DOMAINS_FILE" | grep -v '^$' || true
@@ -420,7 +445,7 @@ do_block() {
 	kernel_update_hosts
 
 	echo -e "${CYAN}Saving domain configuration...${NC}"
-    save_domains "${domains[@]}"
+	sync_config_from_kernel
 
     echo -e "${GREEN}Configured ${#domains[@]} domains. Run 'kblockerctl enable' to activate.${NC}"
 }
@@ -672,22 +697,20 @@ do_add() {
         exit 1
     fi
 
-    local domains=($(read_configured_domains))
+    local domains=($(read_kernel_domains))
     for d in "${domains[@]}"; do
         if [[ "$d" == "$domain" ]]; then
-            echo "$domain is already configured."
+            echo "$domain is already blocked."
             exit 0
         fi
     done
 
-domains+=("$domain")
-	save_domains "${domains[@]}"
+    domains+=("$domain")
+    write_domains_to_sysfs "${domains[@]}"
+    kernel_update_hosts
+    sync_config_from_kernel
 
-	write_domains_to_sysfs "${domains[@]}"
-
-	kernel_update_hosts
-
-	echo "Added $domain. Run 'kblockerctl enable' to activate."
+    echo "Added $domain. Run 'kblockerctl enable' to activate."
 }
 
 do_remove() {
@@ -701,7 +724,7 @@ do_remove() {
         exit 1
     fi
 
-    local domains=($(read_configured_domains))
+    local domains=($(read_kernel_domains))
     local new_domains=()
     local found=false
     for d in "${domains[@]}"; do
@@ -717,17 +740,16 @@ do_remove() {
         exit 0
     fi
 
-save_domains "${new_domains[@]}"
+    if [[ ${#new_domains[@]} -eq 0 ]]; then
+        echo "" > "$SYSFS_BASE/blocked_domains" 2>/dev/null || true
+    else
+        write_domains_to_sysfs "${new_domains[@]}"
+    fi
 
-	if [[ ${#new_domains[@]} -eq 0 ]]; then
-		echo "" > "$SYSFS_BASE/blocked_domains" 2>/dev/null || true
-	else
-		write_domains_to_sysfs "${new_domains[@]}"
-	fi
+    kernel_update_hosts
+    sync_config_from_kernel
 
-	kernel_update_hosts
-
-	echo "Removed $domain."
+    echo "Removed $domain."
 }
 
 do_block_ip() {
