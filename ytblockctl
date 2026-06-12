@@ -112,11 +112,18 @@ resolve_to_ips() {
 update_hosts() {
     local domains=("$@")
     local hosts_file="/etc/hosts"
-    local tmp_file=$(mktemp)
+    local tmp_file=$(mktemp /etc/.hosts.XXXXXX)
 
-    cp "$hosts_file" "$tmp_file"
+    if [[ -z "$tmp_file" || ! -f "$tmp_file" ]]; then
+        echo -e "${RED}Error: could not create temp file${NC}" >&2
+        return 1
+    fi
 
-    if grep -q "$HOSTS_MARKER" "$tmp_file"; then
+    if [[ -f "$hosts_file" ]]; then
+        cp "$hosts_file" "$tmp_file"
+    fi
+
+    if grep -q "$HOSTS_MARKER" "$tmp_file" 2>/dev/null; then
         sed -i "/$HOSTS_MARKER/,/^$/d" "$tmp_file"
     fi
 
@@ -124,34 +131,51 @@ update_hosts() {
     echo "$HOSTS_MARKER" >> "$tmp_file"
     for domain in "${domains[@]}"; do
         echo "0.0.0.0 $domain" >> "$tmp_file"
+        echo ":: $domain" >> "$tmp_file"
         echo "0.0.0.0 www.$domain" >> "$tmp_file"
+        echo ":: www.$domain" >> "$tmp_file"
     done
     echo "" >> "$tmp_file"
 
     chmod 644 "$tmp_file"
-    cp "$tmp_file" "$hosts_file"
-
     if command -v chattr &>/dev/null; then
-        chattr +i "$hosts_file" 2>/dev/null || true
+        chattr -i "$hosts_file" 2>/dev/null || true
     fi
-
-    rm -f "$tmp_file"
+    if mv "$tmp_file" "$hosts_file" 2>/dev/null; then
+        if command -v chattr &>/dev/null; then
+            chattr +i "$hosts_file" 2>/dev/null || true
+        fi
+    else
+        cp "$tmp_file" "$hosts_file" 2>/dev/null || {
+            echo -e "${YELLOW}Warning: could not update /etc/hosts${NC}" >&2
+        }
+        rm -f "$tmp_file"
+    fi
 }
 
 clear_hosts() {
     local hosts_file="/etc/hosts"
-    local tmp_file=$(mktemp)
+    local tmp_file=$(mktemp /etc/.hosts.XXXXXX)
 
-    if command -v chattr &>/dev/null; then
-        chattr -i "$hosts_file" 2>/dev/null || true
+    if [[ -z "$tmp_file" || ! -f "$tmp_file" ]]; then
+        return 1
     fi
 
     cp "$hosts_file" "$tmp_file"
 
     if grep -q "$HOSTS_MARKER" "$tmp_file"; then
         sed -i "/$HOSTS_MARKER/,/^$/d" "$tmp_file"
+        if command -v chattr &>/dev/null; then
+            chattr -i "$hosts_file" 2>/dev/null || true
+        fi
+        if mv "$tmp_file" "$hosts_file" 2>/dev/null; then
+            echo "Cleared ytblock entries from /etc/hosts"
+            return 0
+        fi
         if cp "$tmp_file" "$hosts_file" 2>/dev/null; then
             echo "Cleared ytblock entries from /etc/hosts"
+            rm -f "$tmp_file"
+            return 0
         fi
     fi
 
@@ -206,7 +230,7 @@ read_key_from_sysfs() {
 pgp_key_name() {
     local fp="$1"
     local name_file="$PGP_KEY_DIR/$fp.name"
-    if [[ -f "$name_file ]]; then
+    if [[ -f "$name_file" ]]; then
         cat "$name_file"
     fi
 }
@@ -234,7 +258,7 @@ pgp_encrypt_key() {
         local fp
         fp=$(gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^fpr:' | cut -d: -f10 | head -1)
         [[ -n "$fp" ]] || continue
-        echo -n "$hex_key" | gpg --trust-model=always --encrypt --armor \
+        echo -n "$hex_key" | gpg --yes --trust-model=always --encrypt --armor \
             --recipient-file "$f" \
             --output "$out_dir/unlock-$fp.asc" 2>/dev/null && \
         chmod 600 "$out_dir/unlock-$fp.asc" && \
@@ -338,6 +362,13 @@ do_enable() {
     if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [[ "$minutes" -eq 0 ]]; then
         echo "Error: specify a positive number of minutes." >&2
         exit 1
+    fi
+
+    local domains=($(read_configured_domains))
+    if [[ ${#domains[@]} -gt 0 ]]; then
+        echo -e "${CYAN}Writing ${#domains[@]} domains to kernel...${NC}"
+        write_domains_to_sysfs "${domains[@]}"
+        update_hosts "${domains[@]}"
     fi
 
     local hex_key
@@ -843,7 +874,7 @@ do_add_pgp() {
         if [[ -n "$hex_key" ]]; then
             echo -e "${CYAN}Encrypting existing key for new recipient...${NC}"
             mkdir -p "$PGP_ENC_DIR"
-            echo -n "$hex_key" | gpg --trust-model=always --encrypt --armor \
+            echo -n "$hex_key" | gpg --yes --trust-model=always --encrypt --armor \
                 --recipient-file "$dest" \
                 --output "$PGP_ENC_DIR/unlock-$fp.asc" 2>/dev/null && \
             chmod 600 "$PGP_ENC_DIR/unlock-$fp.asc"

@@ -51,11 +51,7 @@ static u8 key_hash[32];
 static bool state_restored;
 static struct kobject *ytblock_kobj;
 static struct nf_hook_ops nfho_out;
-static struct nf_hook_ops nfho_out6;
-static struct nf_hook_ops nfho_forward6;
 static struct nf_hook_ops nfho_forward;
-static bool ipv6_registered;
-static bool forward6_registered;
 static bool ipv4_registered;
 static bool forward_registered;
 
@@ -222,20 +218,45 @@ static bool sni_matches_blocked(const struct sk_buff *skb, struct tcphdr *tcph)
 	return false;
 }
 
+static unsigned int ytblock_hook_v4(void *priv, struct sk_buff *skb,
+				    const struct nf_hook_state *state);
+#if IS_ENABLED(CONFIG_IPV6)
+static unsigned int ytblock_hook_v6(void *priv, struct sk_buff *skb,
+				    const struct nf_hook_state *state);
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
-static unsigned int ytblock_hook_out(void *priv, struct sk_buff *skb,
+static unsigned int ytblock_hook(void *priv, struct sk_buff *skb,
 				     const struct nf_hook_state *state)
 #else
-static unsigned int ytblock_hook_out(unsigned int hooknum, struct sk_buff *skb,
+static unsigned int ytblock_hook(unsigned int hooknum, struct sk_buff *skb,
 				     const struct net_device *in, const struct net_device *out,
 				     int (*okfn)(struct sk_buff *))
 #endif
 {
-	struct iphdr *iph;
-	struct tcphdr *tcph;
-
 	if (!READ_ONCE(enabled)) return NF_ACCEPT;
 	if (!skb) return NF_ACCEPT;
+
+	if (state->pf == NFPROTO_IPV4)
+		return ytblock_hook_v4(priv, skb, state);
+#if IS_ENABLED(CONFIG_IPV6)
+	if (state->pf == NFPROTO_IPV6)
+		return ytblock_hook_v6(priv, skb, state);
+#endif
+	return NF_ACCEPT;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
+static unsigned int ytblock_hook_v4(void *priv, struct sk_buff *skb,
+				    const struct nf_hook_state *state)
+#else
+static unsigned int ytblock_hook_v4(unsigned int hooknum, struct sk_buff *skb,
+				    const struct net_device *in, const struct net_device *out,
+				    int (*okfn)(struct sk_buff *))
+#endif
+{
+	struct iphdr *iph;
+	struct tcphdr *tcph;
 
 	if (READ_ONCE(blocked_count_v4)) {
 		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
@@ -285,27 +306,20 @@ static unsigned int ytblock_hook_out(unsigned int hooknum, struct sk_buff *skb,
 	return NF_ACCEPT;
 }
 
-static unsigned int ytblock_hook_forward(void *priv, struct sk_buff *skb,
-					 const struct nf_hook_state *state)
-{
-	return ytblock_hook_out(priv, skb, state);
-}
-
 #if IS_ENABLED(CONFIG_IPV6)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
-static unsigned int ytblock_hook_out6(void *priv, struct sk_buff *skb,
-				     const struct nf_hook_state *state)
+static unsigned int ytblock_hook_v6(void *priv, struct sk_buff *skb,
+				    const struct nf_hook_state *state)
 #else
-static unsigned int ytblock_hook_out6(unsigned int hooknum, struct sk_buff *skb,
-				     const struct net_device *in, const struct net_device *out,
-				     int (*okfn)(struct sk_buff *))
+static unsigned int ytblock_hook_v6(unsigned int hooknum, struct sk_buff *skb,
+				    const struct net_device *in, const struct net_device *out,
+				    int (*okfn)(struct sk_buff *))
 #endif
 {
 	struct ipv6hdr *ip6h;
 	struct tcphdr *tcph;
 
 	if (!READ_ONCE(enabled)) return NF_ACCEPT;
-	if (!skb) return NF_ACCEPT;
 
 	if (READ_ONCE(blocked_count_v6)) {
 		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
@@ -322,12 +336,8 @@ static unsigned int ytblock_hook_out6(unsigned int hooknum, struct sk_buff *skb,
 		ip6h = ipv6_hdr(skb);
 		if (!ip6h) return NF_ACCEPT;
 
-		u8 nexthdr;
-		__be16 frag_off;
-		int hdr_offset = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr),
-						  &nexthdr, &frag_off);
-		if (hdr_offset < 0)
-			return NF_ACCEPT;
+		u8 nexthdr = ip6h->nexthdr;
+		int hdr_offset = sizeof(struct ipv6hdr);
 
 		if (nexthdr == IPPROTO_UDP) {
 			if (pskb_may_pull(skb, hdr_offset + sizeof(struct udphdr))) {
@@ -358,12 +368,6 @@ static unsigned int ytblock_hook_out6(unsigned int hooknum, struct sk_buff *skb,
 	}
 
 	return NF_ACCEPT;
-}
-
-static unsigned int ytblock_hook_forward6(void *priv, struct sk_buff *skb,
-					  const struct nf_hook_state *state)
-{
-	return ytblock_hook_out6(priv, skb, state);
 }
 #endif
 
@@ -811,7 +815,6 @@ static int setup_file_protection(void)
 		 "/lib/modules/%s/extra/ytblock.ko", utsname()->release);
 	add_protected_file(ko_path);
 	add_protected_file("/etc/modules-load.d/ytblock.conf");
-	add_protected_file("/etc/hosts");
 
 	timer_setup(&protect_timer, protect_callback, 0);
 	mod_timer(&protect_timer,
@@ -1201,18 +1204,6 @@ static void ytblock_cleanup_netfilter(void)
 		nf_unregister_net_hook(&init_net, &nfho_forward);
 		forward_registered = false;
 	}
-	if (ipv6_registered) {
-#if IS_ENABLED(CONFIG_IPV6)
-		nf_unregister_net_hook(&init_net, &nfho_out6);
-		ipv6_registered = false;
-#endif
-	}
-#if IS_ENABLED(CONFIG_IPV6)
-	if (forward6_registered) {
-		nf_unregister_net_hook(&init_net, &nfho_forward6);
-		forward6_registered = false;
-	}
-#endif
 	if (ipv4_registered) {
 		nf_unregister_net_hook(&init_net, &nfho_out);
 		ipv4_registered = false;
@@ -1302,21 +1293,21 @@ static int __init ytblock_init(void)
 		return ret;
 	}
 
-	nfho_out.hook = ytblock_hook_out;
+	nfho_out.hook = ytblock_hook;
 	nfho_out.hooknum = NF_INET_LOCAL_OUT;
-	nfho_out.pf = NFPROTO_IPV4;
+	nfho_out.pf = NFPROTO_INET;
 	nfho_out.priority = NF_IP_PRI_FILTER;
 
 	ret = nf_register_net_hook(&init_net, &nfho_out);
 	if (ret) {
-		printk(KERN_ERR "ytblock: failed to register IPv4 hook\n");
+		printk(KERN_ERR "ytblock: failed to register LOCAL_OUT hook\n");
 		goto err;
 	}
 	ipv4_registered = true;
 
-	nfho_forward.hook = ytblock_hook_forward;
+	nfho_forward.hook = ytblock_hook;
 	nfho_forward.hooknum = NF_INET_FORWARD;
-	nfho_forward.pf = NFPROTO_IPV4;
+	nfho_forward.pf = NFPROTO_INET;
 	nfho_forward.priority = NF_IP_PRI_FILTER;
 
 	ret = nf_register_net_hook(&init_net, &nfho_forward);
@@ -1324,30 +1315,6 @@ static int __init ytblock_init(void)
 		printk(KERN_WARNING "ytblock: FORWARD hook failed (non-fatal)\n");
 	else
 		forward_registered = true;
-
-#if IS_ENABLED(CONFIG_IPV6)
-	nfho_out6.hook = ytblock_hook_out6;
-	nfho_out6.hooknum = NF_INET_LOCAL_OUT;
-	nfho_out6.pf = NFPROTO_IPV6;
-	nfho_out6.priority = NF_IP_PRI_FILTER;
-
-	ret = nf_register_net_hook(&init_net, &nfho_out6);
-	if (ret)
-		printk(KERN_WARNING "ytblock: IPv6 hook failed (non-fatal)\n");
-	else
-		ipv6_registered = true;
-
-	nfho_forward6.hook = ytblock_hook_forward6;
-	nfho_forward6.hooknum = NF_INET_FORWARD;
-	nfho_forward6.pf = NFPROTO_IPV6;
-	nfho_forward6.priority = NF_IP_PRI_FILTER;
-
-	ret = nf_register_net_hook(&init_net, &nfho_forward6);
-	if (ret)
-		printk(KERN_WARNING "ytblock: IPv6 FORWARD hook failed (non-fatal)\n");
-	else
-		forward6_registered = true;
-#endif
 
 	timer_setup(&enable_timer, enable_timer_cb, 0);
 
