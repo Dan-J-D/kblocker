@@ -1,5 +1,8 @@
 .vscode/
 
+recipients/
+*.asc
+
 *.o
 *.ko
 .*.cmd
