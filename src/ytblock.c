@@ -415,25 +415,25 @@ static void log_blocklist_on_disable(void)
 
 	if (READ_ONCE(blocked_count_v4)) {
 		spin_lock_bh(&ip_list_lock);
-		printk(KERN_INFO "ytblock: blocked IPv4 on disable:");
+		printk(KERN_DEBUG "ytblock: blocked IPv4 on disable:");
 		for (i = 0; i < blocked_count_v4; i++)
-			printk(KERN_INFO "ytblock:   %pI4", &blocked_ips_v4[i]);
+			printk(KERN_DEBUG "ytblock:   %pI4", &blocked_ips_v4[i]);
 		spin_unlock_bh(&ip_list_lock);
 	}
 
 	if (READ_ONCE(blocked_count_v6)) {
 		spin_lock_bh(&ip_list_lock);
-		printk(KERN_INFO "ytblock: blocked IPv6 on disable:");
+		printk(KERN_DEBUG "ytblock: blocked IPv6 on disable:");
 		for (i = 0; i < blocked_count_v6; i++)
-			printk(KERN_INFO "ytblock:   %pI6", &blocked_ips_v6[i]);
+			printk(KERN_DEBUG "ytblock:   %pI6", &blocked_ips_v6[i]);
 		spin_unlock_bh(&ip_list_lock);
 	}
 
 	if (READ_ONCE(blocked_domain_count)) {
 		spin_lock_bh(&ip_list_lock);
-		printk(KERN_INFO "ytblock: blocked domains on disable:");
+		printk(KERN_DEBUG "ytblock: blocked domains on disable:");
 		for (i = 0; i < blocked_domain_count; i++)
-			printk(KERN_INFO "ytblock:   %s", blocked_domains[i]);
+			printk(KERN_DEBUG "ytblock:   %s", blocked_domains[i]);
 		spin_unlock_bh(&ip_list_lock);
 	}
 }
@@ -522,7 +522,7 @@ static void clear_hosts_from_kernel(void)
 		WRITE_ONCE(ytblock_bypass_protection, false);
 		return;
 	}
-	printk(KERN_INFO "ytblock: clear_hosts: found marker at offset %ld\n", p - buf);
+	printk(KERN_DEBUG "ytblock: clear_hosts: found marker at offset %ld\n", p - buf);
 
 	out_len = p - buf;
 	while (out_len > 0 && buf[out_len - 1] == '\n')
@@ -560,7 +560,7 @@ static void clear_hosts_from_kernel(void)
 	kfree(buf);
 	filp_close(file, NULL);
 
-	printk(KERN_INFO "ytblock: cleared hosts file entries\n");
+	printk(KERN_DEBUG "ytblock: cleared hosts file entries\n");
 	WRITE_ONCE(ytblock_bypass_protection, false);
 }
 
@@ -673,7 +673,7 @@ static int update_hosts_file(void)
 	kfree(out);
 	filp_close(file, NULL);
 
-	printk(KERN_INFO "ytblock: updated hosts file with %d domains\n", ndom);
+	printk(KERN_DEBUG "ytblock: updated hosts file with %d domains\n", ndom);
 	WRITE_ONCE(ytblock_bypass_protection, false);
 	return 0;
 }
@@ -1389,7 +1389,7 @@ static void try_restore_state_from_disk(void)
 		if (*p == '1') {
 			WRITE_ONCE(pgp_active, true);
 			memzero_explicit(unload_key, sizeof(unload_key));
-			printk(KERN_INFO "ytblock: PGP mode restored from disk\n");
+			printk(KERN_DEBUG "ytblock: PGP mode restored from disk\n");
 		}
 	}
 

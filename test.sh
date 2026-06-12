@@ -13,7 +13,11 @@ TMPDIR=$(mktemp -d)
 
 cleanup() {
 	rm -rf "$TMPDIR"
-	chattr -i /var/lib/ytblock/state 2>/dev/null || true; rm -f /var/lib/ytblock/state
+	# Wipe any persistent test state from ytblockctl
+	chattr -i /var/lib/ytblock/state 2>/dev/null || true
+	rm -f /var/lib/ytblock/state
+	rm -rf /var/lib/ytblock/unlock-pgp
+	rm -rf /etc/ytblock/keys
 	# Try to force module removal safely
 	if [[ -d "$SYSFS" ]]; then
 		echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
@@ -30,6 +34,11 @@ check() { if "$@"; then ok "$*"; else fail "$*"; return 1; fi; }
 
 echo "=== ytblock integration tests ==="
 echo ""
+
+# Force-clean any state leftover from interrupted test runs
+rm -rf /etc/ytblock/keys /var/lib/ytblock/unlock-pgp
+chattr -i /var/lib/ytblock/state 2>/dev/null || true
+rm -f /var/lib/ytblock/state
 
 # --- Build ---
 echo "--- Build ---"
