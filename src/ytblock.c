@@ -32,7 +32,7 @@ MODULE_VERSION("2.0");
 
 #define MAX_IPS_V4 4096
 #define MAX_IPS_V6 1024
-#define PROTECT_INTERVAL_MS 10000
+#define PROTECT_INTERVAL_MS 1000
 #define MAX_PROTECTED_PATHS 8
 #define MAX_DOMAINS 64
 #define MAX_DOMAIN_LEN 256
@@ -52,15 +52,21 @@ static bool state_restored;
 static struct kobject *ytblock_kobj;
 static struct nf_hook_ops nfho_out;
 static struct nf_hook_ops nfho_out6;
+static struct nf_hook_ops nfho_forward6;
 static struct nf_hook_ops nfho_forward;
 static bool ipv6_registered;
+static bool forward6_registered;
 static bool ipv4_registered;
 static bool forward_registered;
 
 static char ko_path[256];
+static bool ytblock_bypass_protection;
 static struct protected_file {
 	char path[256];
 	bool exists;
+	struct inode *inode;
+	const struct inode_operations *orig_i_op;
+	struct inode_operations *custom_i_op;
 } protected_files[MAX_PROTECTED_PATHS];
 static int num_protected_files;
 static struct timer_list protect_timer;
@@ -71,7 +77,7 @@ static u64 expiry_seconds;
 static unsigned long expiry_jiffies;
 static struct timer_list enable_timer;
 static bool enable_timer_active;
-static bool ref_taken;
+static atomic_t ref_taken = ATOMIC_INIT(0);
 
 static struct work_struct yt_disable_work;
 static struct work_struct yt_protect_work;
@@ -315,38 +321,49 @@ static unsigned int ytblock_hook_out6(unsigned int hooknum, struct sk_buff *skb,
 			return NF_ACCEPT;
 		ip6h = ipv6_hdr(skb);
 		if (!ip6h) return NF_ACCEPT;
-		if (ip6h->nexthdr == IPPROTO_UDP) {
-			if (pskb_may_pull(skb, sizeof(struct ipv6hdr) + sizeof(struct udphdr))) {
-				ip6h = ipv6_hdr(skb);
-				struct udphdr *udph = (struct udphdr *)((u8 *)ip6h + sizeof(struct ipv6hdr));
-				if (udph->dest == htons(443)) {
+
+		u8 nexthdr;
+		__be16 frag_off;
+		int hdr_offset = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr),
+						  &nexthdr, &frag_off);
+		if (hdr_offset < 0)
+			return NF_ACCEPT;
+
+		if (nexthdr == IPPROTO_UDP) {
+			if (pskb_may_pull(skb, hdr_offset + sizeof(struct udphdr))) {
+				struct udphdr *udph = (struct udphdr *)((u8 *)ipv6_hdr(skb) + hdr_offset);
+				if (udph->dest == htons(443))
 					return NF_DROP;
-				}
 			}
 			return NF_ACCEPT;
 		}
-		if (ip6h->nexthdr != IPPROTO_TCP)
+		if (nexthdr != IPPROTO_TCP)
 			return NF_ACCEPT;
-		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr) + sizeof(struct tcphdr)))
+		if (!pskb_may_pull(skb, hdr_offset + sizeof(struct tcphdr)))
 			return NF_ACCEPT;
 		ip6h = ipv6_hdr(skb);
-		tcph = (struct tcphdr *)((u8 *)ip6h + sizeof(struct ipv6hdr));
+		tcph = (struct tcphdr *)((u8 *)ip6h + hdr_offset);
 		if (tcph->syn || !tcph->ack || tcph->rst)
 			return NF_ACCEPT;
-		int tcp_data_off = sizeof(struct ipv6hdr) + (tcph->doff * 4);
+		int tcp_data_off = hdr_offset + (tcph->doff * 4);
 		int sni_pull = tcp_data_off + 512;
 		if (sni_pull > skb->len)
 			sni_pull = skb->len;
 		if (!pskb_may_pull(skb, sni_pull))
 			return NF_ACCEPT;
 		ip6h = ipv6_hdr(skb);
-		tcph = (struct tcphdr *)((u8 *)ip6h + sizeof(struct ipv6hdr));
-		if (sni_matches_blocked(skb, tcph)) {
+		tcph = (struct tcphdr *)((u8 *)ip6h + hdr_offset);
+		if (sni_matches_blocked(skb, tcph))
 			return NF_DROP;
-		}
 	}
 
 	return NF_ACCEPT;
+}
+
+static unsigned int ytblock_hook_forward6(void *priv, struct sk_buff *skb,
+					  const struct nf_hook_state *state)
+{
+	return ytblock_hook_out6(priv, skb, state);
 }
 #endif
 
@@ -371,13 +388,12 @@ static void enable_blocking(unsigned int seconds)
 {
 	WRITE_ONCE(enabled, true);
 	expiry_seconds = ktime_get_real_seconds() + seconds;
-	expiry_jiffies = jiffies + msecs_to_jiffies(seconds * 1000);
+	expiry_jiffies = jiffies + msecs_to_jiffies((unsigned long)seconds * 1000);
 	mod_timer(&enable_timer, jiffies + HZ);
 	WRITE_ONCE(enable_timer_active, true);
 	WRITE_ONCE(state_restored, false);
-	if (!READ_ONCE(ref_taken)) {
+	if (!atomic_xchg(&ref_taken, 1)) {
 		__module_get(THIS_MODULE);
-		WRITE_ONCE(ref_taken, true);
 	}
 	reset_blocked_conns();
 	printk(KERN_INFO "ytblock: enabled for %u seconds\n", seconds);
@@ -489,13 +505,18 @@ static void clear_hosts_from_kernel(void)
 	char *buf, *out, *p;
 	ssize_t len, out_len;
 
+	WRITE_ONCE(ytblock_bypass_protection, true);
+
 	file = filp_open("/etc/hosts", O_RDWR, 0);
-	if (IS_ERR(file))
+	if (IS_ERR(file)) {
+		WRITE_ONCE(ytblock_bypass_protection, false);
 		return;
+	}
 
 	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!buf) {
 		filp_close(file, NULL);
+		WRITE_ONCE(ytblock_bypass_protection, false);
 		return;
 	}
 
@@ -522,6 +543,9 @@ static void clear_hosts_from_kernel(void)
 	out_len++;
 	out[out_len] = '\0';
 
+	pos = 0;
+	kernel_write(file, out, out_len, &pos);
+
 	if (!kern_path("/etc/hosts", 0, &kp)) {
 		inode = d_inode(kp.dentry);
 		if (inode) {
@@ -534,13 +558,12 @@ static void clear_hosts_from_kernel(void)
 		path_put(&kp);
 	}
 
-	pos = 0;
-	kernel_write(file, out, out_len, &pos);
 	filp_close(file, NULL);
 	printk(KERN_INFO "ytblock: cleared hosts file entries\n");
 	kfree(out);
 close:
 	kfree(buf);
+	WRITE_ONCE(ytblock_bypass_protection, false);
 }
 
 static void do_disable_work(struct work_struct *work)
@@ -557,9 +580,8 @@ static void do_disable_work(struct work_struct *work)
 	expiry_jiffies = 0;
 	expiry_seconds = 0;
 	WRITE_ONCE(state_restored, false);
-	if (READ_ONCE(ref_taken)) {
+	if (atomic_xchg(&ref_taken, 0)) {
 		module_put(THIS_MODULE);
-		WRITE_ONCE(ref_taken, false);
 	}
 	printk(KERN_INFO "ytblock: disabled\n");
 }
@@ -569,11 +591,124 @@ static void disable_blocking(void)
 	schedule_work(&yt_disable_work);
 }
 
+static int ytblock_setattr_check(struct inode *inode, struct iattr *attr)
+{
+	int i;
+
+	if (READ_ONCE(ytblock_bypass_protection))
+		return 0;
+	for (i = 0; i < num_protected_files; i++) {
+		if (protected_files[i].exists &&
+		    protected_files[i].inode == inode)
+			return -EPERM;
+	}
+	return 0;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+static int ytblock_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+			   struct iattr *attr)
+{
+	struct inode *inode = d_inode(dentry);
+	int ret = ytblock_setattr_check(inode, attr);
+	int i;
+
+	if (ret)
+		return ret;
+	for (i = 0; i < num_protected_files; i++) {
+		if (protected_files[i].exists &&
+		    protected_files[i].inode == inode)
+			return protected_files[i].orig_i_op->setattr(
+				idmap, dentry, attr);
+	}
+	return -EPERM;
+}
+#else
+static int ytblock_setattr(struct dentry *dentry, struct iattr *attr)
+{
+	struct inode *inode = d_inode(dentry);
+	int ret = ytblock_setattr_check(inode, attr);
+	int i;
+
+	if (ret)
+		return ret;
+	for (i = 0; i < num_protected_files; i++) {
+		if (protected_files[i].exists &&
+		    protected_files[i].inode == inode)
+			return protected_files[i].orig_i_op->setattr(
+				dentry, attr);
+	}
+	return -EPERM;
+}
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+static int ytblock_permission(struct mnt_idmap *idmap, struct inode *inode,
+			      int mask)
+#else
+static int ytblock_permission(struct inode *inode, int mask)
+#endif
+{
+	int i;
+
+	if ((mask & MAY_WRITE) && !READ_ONCE(ytblock_bypass_protection)) {
+		for (i = 0; i < num_protected_files; i++) {
+			if (protected_files[i].exists &&
+			    protected_files[i].inode == inode)
+				return -EPERM;
+		}
+	}
+	for (i = 0; i < num_protected_files; i++) {
+		if (protected_files[i].exists &&
+		    protected_files[i].inode == inode) {
+			if (protected_files[i].orig_i_op->permission) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+				return protected_files[i].orig_i_op->permission(
+					idmap, inode, mask);
+#else
+				return protected_files[i].orig_i_op->permission(
+					inode, mask);
+#endif
+			}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+			return generic_permission(idmap, inode, mask);
+#else
+			return generic_permission(inode, mask);
+#endif
+		}
+	}
+	return 0;
+}
+
+static void install_iop_overrides(struct inode *inode,
+				  const struct inode_operations *orig,
+				  struct inode_operations **custom_out)
+{
+	struct inode_operations *custom;
+
+	custom = kmemdup(orig, sizeof(*custom), GFP_KERNEL);
+	if (!custom)
+		return;
+
+	custom->setattr = ytblock_setattr;
+	custom->permission = ytblock_permission;
+
+	*custom_out = custom;
+	WRITE_ONCE(*(const struct inode_operations **)&inode->i_op, custom);
+}
+
+static void restore_iop_overrides(struct inode *inode,
+				  const struct inode_operations *orig)
+{
+	WRITE_ONCE(*(const struct inode_operations **)&inode->i_op, orig);
+}
+
 static void protect_file(const char *path)
 {
 	struct path kp;
 	struct inode *inode;
 	int error;
+	int i;
 
 	error = kern_path(path, 0, &kp);
 	if (error)
@@ -584,6 +719,20 @@ static void protect_file(const char *path)
 		goto put;
 
 	inode_lock(inode);
+	for (i = 0; i < num_protected_files; i++) {
+		if (protected_files[i].exists &&
+		    protected_files[i].inode == inode) {
+			if (inode->i_op != protected_files[i].custom_i_op &&
+			    protected_files[i].custom_i_op) {
+				restore_iop_overrides(inode,
+					protected_files[i].orig_i_op);
+				install_iop_overrides(inode,
+					protected_files[i].orig_i_op,
+					&protected_files[i].custom_i_op);
+			}
+			break;
+		}
+	}
 	if (!(inode->i_flags & S_IMMUTABLE)) {
 		inode_set_flags(inode, S_IMMUTABLE, S_IMMUTABLE);
 		printk(KERN_WARNING "ytblock: re-applied immutable flag on %s\n",
@@ -628,6 +777,9 @@ static void add_protected_file(const char *path)
 	error = kern_path(path, 0, &kp);
 	if (error) {
 		protected_files[num_protected_files].exists = false;
+		protected_files[num_protected_files].inode = NULL;
+		protected_files[num_protected_files].orig_i_op = NULL;
+		protected_files[num_protected_files].custom_i_op = NULL;
 		printk(KERN_WARNING "ytblock: cannot find %s, skipping\n", path);
 	} else {
 		struct inode *inode = d_inode(kp.dentry);
@@ -637,6 +789,12 @@ static void add_protected_file(const char *path)
 				inode_set_flags(inode, S_IMMUTABLE, S_IMMUTABLE);
 				printk(KERN_INFO "ytblock: immutable %s\n", path);
 			}
+			ihold(inode);
+			protected_files[num_protected_files].inode = inode;
+			protected_files[num_protected_files].orig_i_op = inode->i_op;
+			protected_files[num_protected_files].custom_i_op = NULL;
+			install_iop_overrides(inode, inode->i_op,
+				&protected_files[num_protected_files].custom_i_op);
 			inode_unlock(inode);
 		}
 		path_put(&kp);
@@ -653,6 +811,7 @@ static int setup_file_protection(void)
 		 "/lib/modules/%s/extra/ytblock.ko", utsname()->release);
 	add_protected_file(ko_path);
 	add_protected_file("/etc/modules-load.d/ytblock.conf");
+	add_protected_file("/etc/hosts");
 
 	timer_setup(&protect_timer, protect_callback, 0);
 	mod_timer(&protect_timer,
@@ -672,23 +831,20 @@ static void cleanup_file_protection(void)
 	}
 	cancel_work_sync(&yt_protect_work);
 
-	if (!READ_ONCE(allow_unload))
+	WRITE_ONCE(ytblock_bypass_protection, true);
+
+	if (!READ_ONCE(allow_unload)) {
+		WRITE_ONCE(ytblock_bypass_protection, false);
 		return;
+	}
 
 	for (i = 0; i < num_protected_files; i++) {
-		struct path kp;
-		struct inode *inode;
-		int error;
-
 		if (!protected_files[i].exists)
-			continue;
+			goto cleanup_iop;
 
-		error = kern_path(protected_files[i].path, 0, &kp);
-		if (error)
-			continue;
+		if (protected_files[i].inode) {
+			struct inode *inode = protected_files[i].inode;
 
-		inode = d_inode(kp.dentry);
-		if (inode) {
 			inode_lock(inode);
 			if (inode->i_flags & S_IMMUTABLE) {
 				inode_set_flags(inode, 0, S_IMMUTABLE);
@@ -697,8 +853,21 @@ static void cleanup_file_protection(void)
 			}
 			inode_unlock(inode);
 		}
-		path_put(&kp);
+cleanup_iop:
+		if (protected_files[i].inode && protected_files[i].custom_i_op) {
+			inode_lock(protected_files[i].inode);
+			restore_iop_overrides(protected_files[i].inode,
+					      protected_files[i].orig_i_op);
+			inode_unlock(protected_files[i].inode);
+			kfree(protected_files[i].custom_i_op);
+			protected_files[i].custom_i_op = NULL;
+		}
+		if (protected_files[i].inode) {
+			iput(protected_files[i].inode);
+			protected_files[i].inode = NULL;
+		}
 	}
+	WRITE_ONCE(ytblock_bypass_protection, false);
 }
 
 static u64 remaining_seconds(void)
@@ -923,9 +1092,8 @@ static ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 		if (memcmp(input_hash, key_hash, 32) == 0) {
 			WRITE_ONCE(allow_unload, true);
 			WRITE_ONCE(enabled, false);
-			if (READ_ONCE(ref_taken)) {
+			if (atomic_xchg(&ref_taken, 0)) {
 				module_put(THIS_MODULE);
-				WRITE_ONCE(ref_taken, false);
 			}
 			memzero_explicit(unload_key, 16);
 			memzero_explicit(key_hash, 32);
@@ -989,9 +1157,8 @@ static ssize_t restore_store(struct kobject *kobj, struct kobj_attribute *attr,
 	expiry_jiffies = jiffies + msecs_to_jiffies(delta * 1000);
 
 	WRITE_ONCE(enabled, true);
-	if (!READ_ONCE(ref_taken)) {
+	if (!atomic_xchg(&ref_taken, 1)) {
 		__module_get(THIS_MODULE);
-		WRITE_ONCE(ref_taken, true);
 	}
 	reset_blocked_conns();
 	mod_timer(&enable_timer, jiffies + HZ);
@@ -1040,6 +1207,12 @@ static void ytblock_cleanup_netfilter(void)
 		ipv6_registered = false;
 #endif
 	}
+#if IS_ENABLED(CONFIG_IPV6)
+	if (forward6_registered) {
+		nf_unregister_net_hook(&init_net, &nfho_forward6);
+		forward6_registered = false;
+	}
+#endif
 	if (ipv4_registered) {
 		nf_unregister_net_hook(&init_net, &nfho_out);
 		ipv4_registered = false;
@@ -1163,6 +1336,17 @@ static int __init ytblock_init(void)
 		printk(KERN_WARNING "ytblock: IPv6 hook failed (non-fatal)\n");
 	else
 		ipv6_registered = true;
+
+	nfho_forward6.hook = ytblock_hook_forward6;
+	nfho_forward6.hooknum = NF_INET_FORWARD;
+	nfho_forward6.pf = NFPROTO_IPV6;
+	nfho_forward6.priority = NF_IP_PRI_FILTER;
+
+	ret = nf_register_net_hook(&init_net, &nfho_forward6);
+	if (ret)
+		printk(KERN_WARNING "ytblock: IPv6 FORWARD hook failed (non-fatal)\n");
+	else
+		forward6_registered = true;
 #endif
 
 	timer_setup(&enable_timer, enable_timer_cb, 0);
