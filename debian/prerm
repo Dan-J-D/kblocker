@@ -1,0 +1,28 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        systemctl stop ytblock-refresh.timer 2>/dev/null || true
+        systemctl disable ytblock-refresh.timer 2>/dev/null || true
+
+        if [ -d /sys/kernel/ytblock ]; then
+            echo 0 > /sys/kernel/ytblock/enabled 2>/dev/null || true
+            sleep 1
+            rmmod ytblock 2>/dev/null || rmmod -f ytblock 2>/dev/null || true
+        fi
+
+        for f in \
+            /etc/modules-load.d/ytblock.conf \
+            /lib/modules/$(uname -r)/extra/ytblock.ko; do
+            if [ -f "$f" ] && command -v chattr >/dev/null 2>&1; then
+                chattr -i "$f" 2>/dev/null || true
+            fi
+        done
+
+        HOSTS_MARKER="# ytblock managed entries - do not edit manually"
+        if grep -q "$HOSTS_MARKER" /etc/hosts 2>/dev/null; then
+            sed -i "/$HOSTS_MARKER/,/^$/d" /etc/hosts
+        fi
+        ;;
+esac

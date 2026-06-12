@@ -58,14 +58,19 @@ Usage:
   ytblockctl key
       Show unload key and PGP key fingerprints.
 
-  ytblockctl add-pgp <pubkey.asc>
+  ytblockctl add-pgp <pubkey.asc> [name]
       Register a PGP public key for unlock encryption.
+      Optionally assign a name (e.g. "alice") to identify it later.
 
   ytblockctl remove-pgp <fingerprint>
       Remove a registered PGP key.
 
   ytblockctl list-pgp
       List registered PGP keys.
+
+  ytblockctl pgp-cipher <fingerprint>
+      Print the PGP-encrypted unload key for a registered key.
+      Useful for copying to another machine to decrypt.
 
   ytblockctl crash
       Trigger kernel panic (for emergency willpower).
@@ -145,8 +150,9 @@ clear_hosts() {
 
     if grep -q "$HOSTS_MARKER" "$tmp_file"; then
         sed -i "/$HOSTS_MARKER/,/^$/d" "$tmp_file"
-        cp "$tmp_file" "$hosts_file"
-        echo "Cleared ytblock entries from /etc/hosts"
+        if cp "$tmp_file" "$hosts_file" 2>/dev/null; then
+            echo "Cleared ytblock entries from /etc/hosts"
+        fi
     fi
 
     rm -f "$tmp_file"
@@ -195,6 +201,14 @@ save_domains() {
 
 read_key_from_sysfs() {
     cat "$SYSFS_BASE/key" 2>/dev/null || true
+}
+
+pgp_key_name() {
+    local fp="$1"
+    local name_file="$PGP_KEY_DIR/$fp.name"
+    if [[ -f "$name_file ]]; then
+        cat "$name_file"
+    fi
 }
 
 pgp_key_fingerprints() {
@@ -756,7 +770,11 @@ do_key() {
         for fp in $(pgp_key_fingerprints "$PGP_KEY_DIR"); do
             local enc_status="no"
             [[ -f "$PGP_ENC_DIR/unlock-$fp.asc" ]] && enc_status="yes"
-            echo "  $fp  (encrypted: $enc_status)"
+            local name
+            name=$(pgp_key_name "$fp")
+            local label=""
+            [[ -n "$name" ]] && label=" ($name)"
+            echo "  $fp$label  (encrypted: $enc_status)"
         done
     else
         echo "No PGP keys registered."
@@ -782,6 +800,7 @@ do_add_pgp() {
     requires_root
 
     local key_file="$1"
+    local key_name="$2"
     if [[ -z "$key_file" ]]; then
         echo "Error: specify a PGP public key file." >&2
         exit 1
@@ -810,6 +829,11 @@ do_add_pgp() {
     cp "$key_file" "$dest"
     chmod 644 "$dest"
 
+    if [[ -n "$key_name" ]]; then
+        echo "$key_name" > "$PGP_KEY_DIR/$fp.name"
+        chmod 644 "$PGP_KEY_DIR/$fp.name"
+    fi
+
     if module_loaded; then
         local hex_key
         hex_key=$(read_key_from_sysfs 2>/dev/null || true)
@@ -826,7 +850,8 @@ do_add_pgp() {
         fi
     fi
 
-    echo -e "${GREEN}Added PGP key: $fp${NC}"
+    local label="${key_name:-$fp}"
+    echo -e "${GREEN}Added PGP key: $label${NC}"
 }
 
 do_remove_pgp() {
@@ -849,7 +874,7 @@ do_remove_pgp() {
         local fp
         fp=$(gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^fpr:' | cut -d: -f10 | head -1)
         if [[ "$f" == "$PGP_KEY_DIR/$target.asc" || "$fp" == "$target" ]]; then
-            rm -f "$f" "$PGP_ENC_DIR/unlock-$fp.asc"
+            rm -f "$f" "$PGP_ENC_DIR/unlock-$fp.asc" "$PGP_KEY_DIR/$fp.name"
             echo "Removed PGP key: $fp"
             found=true
             break
@@ -877,9 +902,13 @@ do_list_pgp() {
         fp=$(gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^fpr:' | cut -d: -f10 | head -1)
         local user
         user=$(gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^uid:' | cut -d: -f10 | head -1)
+        local name
+        name=$(pgp_key_name "$fp")
         local enc="no"
         [[ -f "$PGP_ENC_DIR/unlock-$fp.asc" ]] && enc="yes"
-        echo "Fingerprint: $fp"
+        local label=""
+        [[ -n "$name" ]] && label=" ($name)"
+        echo "Fingerprint: $fp$label"
         echo "  User:       $user"
         echo "  Encrypted:  $enc"
         echo ""
@@ -889,6 +918,40 @@ do_list_pgp() {
     if [[ $count -eq 0 ]]; then
         echo "No PGP keys registered."
     fi
+}
+
+do_pgp_cipher() {
+    requires_root
+    local needle="$1"
+
+    if [[ -z "$needle" ]]; then
+        echo "Error: specify a PGP key fingerprint (or prefix)." >&2
+        echo "Usage: ytblockctl pgp-cipher <fingerprint>" >&2
+        exit 1
+    fi
+
+    if [[ ! -d "$PGP_ENC_DIR" ]]; then
+        echo "Error: no encrypted keys found in $PGP_ENC_DIR" >&2
+        exit 1
+    fi
+
+    local match=""
+    for f in "$PGP_ENC_DIR"/unlock-*.asc; do
+        [[ -f "$f" ]] || continue
+        local fp="${f##*/unlock-}"
+        fp="${fp%.asc}"
+        if [[ "$fp" == "$needle"* ]]; then
+            match="$f"
+            break
+        fi
+    done
+
+    if [[ -z "$match" ]]; then
+        echo "Error: no encrypted key matching '$needle'." >&2
+        exit 1
+    fi
+
+    cat "$match"
 }
 
 do_crash() {
@@ -929,6 +992,7 @@ case "$CMD" in
     add-pgp)     do_add_pgp "$@" ;;
     remove-pgp)  do_remove_pgp "$@" ;;
     list-pgp)    do_list_pgp  ;;
+    pgp-cipher)  do_pgp_cipher "$@" ;;
     crash)       do_crash     ;;
     help|--help|-h) usage    ;;
     *)

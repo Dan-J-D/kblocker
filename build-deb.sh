@@ -1,0 +1,54 @@
+#!/bin/bash
+set -e
+
+cd "$(dirname "$0")"
+
+KERNEL_VER=$(uname -r)
+
+if [ ! -d "/lib/modules/$KERNEL_VER/build" ]; then
+    echo "Error: kernel headers not found." >&2
+    echo "Install: sudo apt install linux-headers-$KERNEL_VER" >&2
+    exit 1
+fi
+
+echo "==> Building kernel module..."
+make -C /lib/modules/$KERNEL_VER/build M=$PWD modules
+
+PKG_DIR="$PWD/debian/ytblock"
+DEB_DIR="$PKG_DIR/DEBIAN"
+
+echo "==> Staging package files..."
+rm -rf "$PKG_DIR"
+
+install -d "$PKG_DIR/lib/modules/$KERNEL_VER/extra"
+install -m 644 ytblock.ko "$PKG_DIR/lib/modules/$KERNEL_VER/extra/"
+
+install -d "$PKG_DIR/usr/local/bin"
+install -m 755 ytblockctl "$PKG_DIR/usr/local/bin/ytblockctl"
+
+install -d "$PKG_DIR/lib/systemd/system"
+install -m 644 ytblock-refresh.service "$PKG_DIR/lib/systemd/system/"
+install -m 644 ytblock-refresh.timer "$PKG_DIR/lib/systemd/system/"
+
+install -d "$PKG_DIR/etc/ytblock/keys"
+install -d "$PKG_DIR/var/lib/ytblock"
+
+install -d "$DEB_DIR"
+install -m 644 debian/control "$DEB_DIR/control"
+install -m 644 debian/changelog "$DEB_DIR/changelog"
+gzip -9nf "$DEB_DIR/changelog"
+install -m 644 debian/copyright "$DEB_DIR/copyright"
+install -m 755 debian/postinst "$DEB_DIR/postinst"
+install -m 755 debian/prerm "$DEB_DIR/prerm"
+install -m 755 debian/postrm "$DEB_DIR/postrm"
+
+BUILD_DIR="$PWD/build"
+mkdir -p "$BUILD_DIR"
+
+DEB_FILE="$BUILD_DIR/ytblock_$KERNEL_VER.deb"
+echo "==> Building package..."
+fakeroot dpkg-deb --root-owner-group --build "$PKG_DIR" "$DEB_FILE"
+
+echo ""
+echo "Done: $DEB_FILE ($(du -h "$DEB_FILE" | cut -f1))"
+echo "Install: sudo dpkg -i $(basename "$DEB_FILE")"

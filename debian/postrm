@@ -1,0 +1,15 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove|upgrade)
+        rm -f /etc/modules-load.d/ytblock.conf
+        systemctl daemon-reload 2>/dev/null || true
+        ;;
+    purge)
+        rm -f /etc/modules-load.d/ytblock.conf
+        rm -rf /etc/ytblock
+        rm -rf /var/lib/ytblock
+        systemctl daemon-reload 2>/dev/null || true
+        ;;
+esac

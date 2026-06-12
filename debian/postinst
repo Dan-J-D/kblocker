@@ -1,0 +1,30 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure)
+        depmod -a
+
+        echo "ytblock" > /etc/modules-load.d/ytblock.conf
+
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable ytblock-refresh.timer 2>/dev/null || true
+        systemctl start ytblock-refresh.timer 2>/dev/null || true
+
+        KO_FILE="/lib/modules/$(uname -r)/extra/ytblock.ko"
+        if [ -f "$KO_FILE" ] && command -v chattr >/dev/null 2>&1; then
+            chattr +i "$KO_FILE" 2>/dev/null || true
+        fi
+
+        modprobe ytblock 2>/dev/null || \
+            echo "Warning: could not load ytblock module. Reboot or run 'modprobe ytblock'." >&2
+
+        /usr/local/bin/ytblockctl block youtube.com www.youtube.com m.youtube.com \
+            youtu.be ytimg.com googlevideo.com gvt2.com 2>/dev/null || true
+
+        echo "ytblock installed (disabled by default)."
+        echo "  ytblockctl enable 60   — block for 60 minutes"
+        echo "  ytblockctl disable     — stop blocking"
+        echo "  ytblockctl status      — check status"
+        ;;
+esac
