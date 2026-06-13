@@ -5,12 +5,16 @@ KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 DESTDIR ?=
 
-all:
+all: kblockerctl
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+
+kblockerctl: cmd/kblockerctl/main.go
+	printf 'module kblockerctl\n\ngo 1.21\n' > cmd/kblockerctl/go.mod
+	cd cmd/kblockerctl && go build -o ../../kblockerctl .
 
 clean:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
-	rm -f src/*.o src/*.ko src/*.mod.c Module.symvers modules.order
+	rm -f src/*.o src/*.ko src/*.mod.c Module.symvers modules.order kblockerctl
 
 install: all
 	@if [ "$(shell id -u)" -ne 0 ]; then \
@@ -100,4 +104,4 @@ test:
 		exec ./test.sh; \
 	fi
 
-.PHONY: all clean install uninstall test
+.PHONY: all clean install uninstall test kblockerctl
