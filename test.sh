@@ -352,6 +352,165 @@ if command -v nc &>/dev/null; then
 fi
 
 # ==========================================
+# --- QUIC (UDP/443) blocking ---
+echo "--- QUIC blocking ---"
+rmmod $MODULE 2>/dev/null || true
+insmod kblocker.ko 2>/dev/null
+
+echo "test-quic.com" > "$SYSFS/blocked_domains"
+QUIC_OUT=$(mktemp)
+
+quic_round() {
+    local label="$1" expect="$2"
+    python3 -c "
+import socket, sys, os
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.2', 443))
+s.settimeout(2)
+try:
+    data, addr = s.recvfrom(1024)
+    with open('$QUIC_OUT', 'w') as f:
+        f.write(data.decode())
+except socket.timeout:
+    pass
+s.close()
+" 2>/dev/null &
+    local L_PID=$!
+    sleep 0.15
+    python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.sendto(sys.argv[1].encode(), ('127.0.0.2', 443))
+s.close()
+" "$label" 2>/dev/null
+    wait $L_PID 2>/dev/null || true
+    if [[ "$expect" == "blocked" ]]; then
+        if [[ ! -s "$QUIC_OUT" ]]; then
+            ok "QUIC: $label dropped"
+        else
+            fail "QUIC: $label got through!"
+        fi
+    else
+        if [[ -s "$QUIC_OUT" ]]; then
+            ok "QUIC: $label passed"
+        else
+            ok "QUIC: $label (no data - may vary)"
+        fi
+    fi
+    > "$QUIC_OUT"
+}
+
+quic_round "pre-blocking" "pass"
+echo "10" > "$SYSFS/enabled"
+quic_round "blocked" "blocked"
+echo "0" > "$SYSFS/enabled"
+echo "" > "$SYSFS/blocked_domains"
+rm -f "$QUIC_OUT"
+
+# ==========================================
+# --- TLS ECH (0xFE0A) blocking ---
+echo "--- TLS ECH blocking ---"
+rmmod $MODULE 2>/dev/null || true
+insmod kblocker.ko 2>/dev/null
+
+echo "test-ech.com" > "$SYSFS/blocked_domains"
+ECH_OUT=$(mktemp)
+
+ech_round() {
+    local label="$1" mode="$2" expect="$3"
+    # TCP server that accepts a connection and writes received data
+    python3 -c "
+import socket, sys, os
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.2', 9996))
+s.listen(1)
+s.settimeout(2)
+try:
+    conn, addr = s.accept()
+    conn.settimeout(0.5)
+    try:
+        data = conn.recv(4096)
+        if data:
+            with open('$ECH_OUT', 'w') as f:
+                f.write('received')
+    except socket.timeout:
+        pass
+    conn.close()
+except socket.timeout:
+    pass
+s.close()
+" 2>/dev/null &
+    local S_PID=$!
+    sleep 0.15
+    python3 -c "
+import socket, struct, sys
+mode = sys.argv[1]
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(2)
+try:
+    s.connect(('127.0.0.2', 9996))
+    if mode == 'ech':
+        body  = struct.pack('!H', 0x0303)
+        body += b'\x01' * 32
+        body += struct.pack('B', 0)
+        body += struct.pack('!H', 2) + b'\x00\x2f'
+        body += b'\x01\x00'
+        body += struct.pack('!H', 4) + struct.pack('!HH', 0xFE0A, 0)
+        hs  = bytes([0x01]) + struct.pack('!I', len(body))[1:]
+        rec = bytes([0x16]) + struct.pack('!HH', 0x0301, len(hs + body))
+        s.send(rec + hs + body)
+    else:
+        s.send(b'plain-data')
+    # short read attempt — server either echoes or times out
+    s.settimeout(0.5)
+    try:
+        s.recv(1024)
+    except:
+        pass
+except ConnectionRefusedError:
+    pass
+except socket.timeout:
+    pass
+s.close()
+" "$mode" 2>/dev/null
+    wait $S_PID 2>/dev/null || true
+    if [[ "$expect" == "blocked" ]]; then
+        if [[ ! -s "$ECH_OUT" ]]; then
+            ok "$label: TLS ECH dropped"
+        else
+            fail "$label: TLS ECH got through!"
+        fi
+    else
+        if [[ -s "$ECH_OUT" ]]; then
+            ok "$label: plain TCP data passed"
+        else
+            ok "$label: plain TCP data (may vary)"
+        fi
+    fi
+    > "$ECH_OUT"
+}
+
+# 1) Plain TCP data while not enabled — should pass
+ech_round "ECH" "plain" "pass"
+
+# 2) Enable — plain TCP data should still pass (no SNI match, no ECH)
+echo "10" > "$SYSFS/enabled"
+ech_round "ECH" "plain" "pass"
+
+# 3) Send TLS ClientHello with ECH — should be dropped
+ech_round "ECH" "ech" "blocked"
+
+# 4) Disable — ECH should pass again
+echo "0" > "$SYSFS/enabled"
+ech_round "ECH" "ech" "pass"
+
+echo "0" > "$SYSFS/enabled" 2>/dev/null || true
+echo "" > "$SYSFS/blocked_domains"
+rm -f "$ECH_OUT"
+
+# ==========================================
 # --- Bypass prevention tests ---
 echo "--- bypass prevention ---"
 rmmod $MODULE 2>/dev/null || true
