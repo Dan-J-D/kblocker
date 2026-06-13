@@ -625,7 +625,7 @@ static int update_hosts_file(void)
 	out_size = base_len + 2 + sizeof(HOSTS_MARKER) + 1;
 	for (i = 0; i < ndom; i++) {
 		int dlen = strlen(blocked_domains[i]);
-		out_size += dlen * 4 + 30;
+		out_size += dlen * 4 + 64;
 	}
 	spin_unlock_bh(&ip_list_lock);
 	out_size += 1;

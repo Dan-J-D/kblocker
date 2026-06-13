@@ -444,9 +444,6 @@ do_block() {
     echo -e "${CYAN}Writing ${#domains[@]} domains to kernel module...${NC}"
 	write_domains_to_sysfs "${domains[@]}"
 
-	echo -e "${CYAN}Updating /etc/hosts via kernel...${NC}"
-	kernel_update_hosts
-
 	echo -e "${CYAN}Saving domain configuration...${NC}"
 	sync_config_from_kernel
 
@@ -715,7 +712,6 @@ do_add() {
 
     domains+=("$domain")
     write_domains_to_sysfs "${domains[@]}"
-    kernel_update_hosts
     sync_config_from_kernel
 
     echo "Added $domain. Run 'kblockerctl enable' to activate."
@@ -754,10 +750,9 @@ do_remove() {
         write_domains_to_sysfs "${new_domains[@]}"
     fi
 
-    kernel_update_hosts
     sync_config_from_kernel
 
-    echo "Removed $domain."
+    echo "Removed $domain. Run 'kblockerctl enable' to activate."
 }
 
 do_block_ip() {
