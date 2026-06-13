@@ -531,6 +531,44 @@ else
     fail "hosts: IPv6 entry missing"
 fi
 
+# --- hosts file line integrity (no truncation) ---
+echo "" > "$SYSFS/blocked_domains"
+echo 1 > "$SYSFS/update_hosts" 2>/dev/null
+echo "integrity-check-domain.com" > "$SYSFS/blocked_domains"
+echo 1 > "$SYSFS/update_hosts" 2>/dev/null
+TRUNC=0
+EXPECTED_LINES=(
+    "0.0.0.0 integrity-check-domain.com"
+    ":: integrity-check-domain.com"
+    "0.0.0.0 www.integrity-check-domain.com"
+    ":: www.integrity-check-domain.com"
+)
+for line in "${EXPECTED_LINES[@]}"; do
+    if grep -Fxq "$line" /etc/hosts; then
+        ok "hosts: full line present: $line"
+    else
+        # Check if partially present (truncated)
+        if grep -Fq "${line:0:30}" /etc/hosts 2>/dev/null && ! grep -Fxq "$line" /etc/hosts 2>/dev/null; then
+            fail "hosts: TRUNCATED: '$line'"
+            TRUNC=1
+        else
+            fail "hosts: missing: $line"
+        fi
+    fi
+done
+# Verify no bare "0.0.0.0 w" or other truncation artifacts
+if grep -Eq '^0\.0\.0\.0 [a-z]{1,3}$' /etc/hosts; then
+    fail "hosts: truncated IPv4 entry found"
+    TRUNC=1
+fi
+if grep -Eq '^:: [a-z]{1,3}$' /etc/hosts; then
+    fail "hosts: truncated IPv6 entry found"
+    TRUNC=1
+fi
+if [[ "$TRUNC" -eq 0 ]]; then
+    ok "hosts: no truncation artifacts detected"
+fi
+
 # Clearing domains should also trigger cleanup
 echo "" > "$SYSFS/blocked_domains"
 echo 1 > "$SYSFS/update_hosts" 2>/dev/null
