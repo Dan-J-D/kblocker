@@ -29,7 +29,6 @@ const (
 	pgpEncDir           = "/var/lib/kblocker/unlock-pgp"
 	stateFile           = "/var/lib/kblocker/state"
 	blockedDomainsFile  = "/etc/kblocker/domains.conf"
-	hostsMarker         = "# kblocker managed entries - do not edit manually"
 )
 
 var (
@@ -492,10 +491,6 @@ func restoreStateFromFile() bool {
 	return true
 }
 
-func kernelUpdateHosts() {
-	writeSysfs(sysfsBase+"/update_hosts", "1")
-}
-
 func resolveToIPs(domain string) []string {
 	out, err := exec.Command("getent", "ahosts", domain).Output()
 	if err != nil {
@@ -543,7 +538,6 @@ func doEnable(args []string) {
 	if len(domains) > 0 {
 		fmt.Printf("%sWriting %d domains to kernel...%s\n", colorCyan, len(domains), colorNC)
 		writeSysfsLines(sysfsBase+"/blocked_domains", domains)
-		kernelUpdateHosts()
 	}
 
 	if err := writeSysfs(sysfsBase+"/enabled", fmt.Sprintf("%d", minutes*60)); err != nil {
@@ -650,9 +644,6 @@ func doBlock(args []string) {
 
 	fmt.Printf("%sWriting %d domains to kernel module...%s\n", colorCyan, len(args), colorNC)
 	writeSysfsLines(sysfsBase+"/blocked_domains", args)
-
-	fmt.Printf("%sUpdating /etc/hosts via kernel...%s\n", colorCyan, colorNC)
-	kernelUpdateHosts()
 
 	fmt.Printf("%sSaving domain configuration...%s\n", colorCyan, colorNC)
 	syncConfigFromKernel()
@@ -915,9 +906,6 @@ func doReload() {
 	fmt.Printf("%sRe-writing %d domains to kernel module...%s\n", colorCyan, len(domains), colorNC)
 	writeSysfsLines(sysfsBase+"/blocked_domains", domains)
 
-	fmt.Printf("%sUpdating /etc/hosts via kernel...%s\n", colorCyan, colorNC)
-	kernelUpdateHosts()
-
 	numPGP := pgpCount(pgpKeyDir)
 	if numPGP > 0 {
 		hexKey := readKeyFromSysfs()
@@ -975,7 +963,6 @@ func doAdd(args []string) {
 
 	domains = append(domains, domain)
 	writeSysfsLines(sysfsBase+"/blocked_domains", domains)
-	kernelUpdateHosts()
 	syncConfigFromKernel()
 
 	fmt.Printf("Added %s. Run 'kblockerctl enable' to activate.\n", domain)
@@ -1013,7 +1000,6 @@ func doRemove(args []string) {
 	} else {
 		writeSysfsLines(sysfsBase+"/blocked_domains", newDomains)
 	}
-	kernelUpdateHosts()
 	syncConfigFromKernel()
 
 	fmt.Printf("Removed %s. Run 'kblockerctl enable' to activate.\n", domain)

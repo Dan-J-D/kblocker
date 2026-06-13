@@ -382,6 +382,7 @@ static unsigned int kblocker_hook_v6(unsigned int hooknum, struct sk_buff *skb,
 #endif
 
 static void enable_blocking(unsigned int seconds);
+static int update_hosts_file(void);
 static void do_disable_work(struct work_struct *work);
 
 static void enable_timer_cb(struct timer_list *t)
@@ -415,6 +416,7 @@ static void enable_blocking(unsigned int seconds)
 	if (!atomic_xchg(&ref_taken, 1)) {
 		__module_get(THIS_MODULE);
 	}
+	update_hosts_file();
 	printk(KERN_INFO "kblocker: enabled for %u seconds\n", seconds);
 }
 
@@ -1285,6 +1287,7 @@ static void do_restore(const u8 *hash, u64 expiry_ts)
 		__module_get(THIS_MODULE);
 	mod_timer(&enable_timer, jiffies + HZ);
 	WRITE_ONCE(enable_timer_active, true);
+	update_hosts_file();
 
 	printk(KERN_INFO "kblocker: state restored, %llu seconds remaining\n", delta);
 }
@@ -1348,8 +1351,6 @@ static void try_restore_state_from_disk(void)
 				blocked_domain_count = nd;
 				spin_unlock_bh(&ip_list_lock);
 				kfree(orig);
-				if (nd > 0)
-					update_hosts_file();
 			}
 		}
 	}
@@ -1585,8 +1586,6 @@ static void __exit kblocker_exit(void)
 	}
 	cancel_work_sync(&kb_disable_work);
 	cancel_work_sync(&kb_protect_work);
-
-	clear_hosts_from_kernel();
 
 	WRITE_ONCE(allow_unload, true);
 	cleanup_file_protection();
