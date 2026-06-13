@@ -19,14 +19,14 @@ export KBLOCKER_PGP_KEY_DIR="$PGP_KEY_DIR"
 export KBLOCKER_PGP_ENC_DIR="$PGP_ENC_DIR"
 
 cleanup() {
+	# Remove immutable flag from PGP ciphertexts before rm
+	if command -v chattr &>/dev/null && [[ -d "$PGP_ENC_DIR" ]]; then
+		find "$PGP_ENC_DIR" -name '*.asc' -exec chattr -i {} + 2>/dev/null || true
+	fi
 	rm -rf "$TMPDIR"
 	# Wipe any persistent test state from kblockerctl
 	chattr -i /var/lib/kblocker/state 2>/dev/null || true
 	rm -f /var/lib/kblocker/state
-	# Remove immutable flag from any PGP ciphertexts in tmpdir
-	if command -v chattr &>/dev/null && [[ -d "$PGP_ENC_DIR" ]]; then
-		find "$PGP_ENC_DIR" -name '*.asc' -exec chattr -i {} + 2>/dev/null || true
-	fi
 	# Try to force module removal safely
 	if [[ -d "$SYSFS" ]]; then
 		echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
