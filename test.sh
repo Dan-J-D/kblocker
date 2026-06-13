@@ -10,19 +10,19 @@ FAIL=0
 SYSFS="/sys/kernel/kblocker"
 MODULE="kblocker"
 TMPDIR=$(mktemp -d)
+PGP_KEY_DIR="$TMPDIR/pgp-keys"
+PGP_ENC_DIR="$TMPDIR/pgp-enc"
+mkdir -p "$PGP_KEY_DIR" "$PGP_ENC_DIR"
+
+# Redirect kblockerctl PGP paths to test-only tmpdirs
+export KBLOCKER_PGP_KEY_DIR="$PGP_KEY_DIR"
+export KBLOCKER_PGP_ENC_DIR="$PGP_ENC_DIR"
 
 cleanup() {
 	rm -rf "$TMPDIR"
 	# Wipe any persistent test state from kblockerctl
 	chattr -i /var/lib/kblocker/state 2>/dev/null || true
 	rm -f /var/lib/kblocker/state
-	if command -v chattr &>/dev/null && [[ -d /var/lib/kblocker/unlock-pgp ]]; then
-		for f in /var/lib/kblocker/unlock-pgp/unlock-*.asc; do
-			[[ -f "$f" ]] && chattr -i "$f" 2>/dev/null || true
-		done
-	fi
-	rm -rf /var/lib/kblocker/unlock-pgp
-	rm -rf /etc/kblocker/keys
 	# Try to force module removal safely
 	if [[ -d "$SYSFS" ]]; then
 		echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
@@ -40,13 +40,7 @@ check() { if "$@"; then ok "$*"; else fail "$*"; return 1; fi; }
 echo "=== kblocker integration tests ==="
 echo ""
 
-# Force-clean any state leftover from interrupted test runs
-if command -v chattr &>/dev/null && [[ -d /var/lib/kblocker/unlock-pgp ]]; then
-	for f in /var/lib/kblocker/unlock-pgp/unlock-*.asc; do
-		[[ -f "$f" ]] && chattr -i "$f" 2>/dev/null || true
-	done
-fi
-rm -rf /etc/kblocker/keys /var/lib/kblocker/unlock-pgp
+# Clean any leftover module state from interrupted test runs
 chattr -i /var/lib/kblocker/state 2>/dev/null || true
 rm -f /var/lib/kblocker/state
 
@@ -646,7 +640,7 @@ else
 fi
 
 # PGP ciphertext files have 600 permissions
-PGP_ENC_DIR="/var/lib/kblocker/unlock-pgp"
+PGP_ENC_DIR="$KBLOCKER_PGP_ENC_DIR"
 if [[ -d "$PGP_ENC_DIR" ]]; then
     BAD_PERMS=0
     for f in "$PGP_ENC_DIR"/unlock-*.asc; do

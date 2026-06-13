@@ -23,12 +23,15 @@ import (
 )
 
 const (
-	sysfsBase           = "/sys/kernel/kblocker"
-	moduleName          = "kblocker"
-	pgpKeyDir           = "/etc/kblocker/keys"
-	pgpEncDir           = "/var/lib/kblocker/unlock-pgp"
-	stateFile           = "/var/lib/kblocker/state"
-	blockedDomainsFile  = "/etc/kblocker/domains.conf"
+	sysfsBase          = "/sys/kernel/kblocker"
+	moduleName         = "kblocker"
+	stateFile          = "/var/lib/kblocker/state"
+	blockedDomainsFile = "/etc/kblocker/domains.conf"
+)
+
+var (
+	pgpKeyDir = getEnvDefault("KBLOCKER_PGP_KEY_DIR", "/etc/kblocker/keys")
+	pgpEncDir = getEnvDefault("KBLOCKER_PGP_ENC_DIR", "/var/lib/kblocker/unlock-pgp")
 )
 
 var (
@@ -38,6 +41,13 @@ var (
 	colorCyan   = "\033[0;36m"
 	colorNC     = "\033[0m"
 )
+
+func getEnvDefault(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
+}
 
 func init() {
 	// Disable colors if stdout is not a terminal
