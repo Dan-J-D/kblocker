@@ -16,6 +16,11 @@ cleanup() {
 	# Wipe any persistent test state from kblockerctl
 	chattr -i /var/lib/kblocker/state 2>/dev/null || true
 	rm -f /var/lib/kblocker/state
+	if command -v chattr &>/dev/null && [[ -d /var/lib/kblocker/unlock-pgp ]]; then
+		for f in /var/lib/kblocker/unlock-pgp/unlock-*.asc; do
+			[[ -f "$f" ]] && chattr -i "$f" 2>/dev/null || true
+		done
+	fi
 	rm -rf /var/lib/kblocker/unlock-pgp
 	rm -rf /etc/kblocker/keys
 	# Try to force module removal safely
@@ -36,6 +41,11 @@ echo "=== kblocker integration tests ==="
 echo ""
 
 # Force-clean any state leftover from interrupted test runs
+if command -v chattr &>/dev/null && [[ -d /var/lib/kblocker/unlock-pgp ]]; then
+	for f in /var/lib/kblocker/unlock-pgp/unlock-*.asc; do
+		[[ -f "$f" ]] && chattr -i "$f" 2>/dev/null || true
+	done
+fi
 rm -rf /etc/kblocker/keys /var/lib/kblocker/unlock-pgp
 chattr -i /var/lib/kblocker/state 2>/dev/null || true
 rm -f /var/lib/kblocker/state

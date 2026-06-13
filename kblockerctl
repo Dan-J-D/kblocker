@@ -229,6 +229,9 @@ pgp_encrypt_key() {
             --recipient-file "$f" \
             --output "$out_dir/unlock-$fp.asc" 2>/dev/null && \
         chmod 600 "$out_dir/unlock-$fp.asc" && \
+        if command -v chattr &>/dev/null; then \
+            chattr +i "$out_dir/unlock-$fp.asc" 2>/dev/null; \
+        fi && \
         echo "  Encrypted for $fp"
     done
 }
@@ -544,6 +547,11 @@ do_unload() {
         chattr -i "$STATE_FILE" 2>/dev/null || true
     fi
     rm -f "$STATE_FILE"
+    if command -v chattr &>/dev/null && [[ -d "$PGP_ENC_DIR" ]]; then
+        for f in "$PGP_ENC_DIR"/unlock-*.asc; do
+            [[ -f "$f" ]] && chattr -i "$f" 2>/dev/null || true
+        done
+    fi
     rm -rf "$PGP_ENC_DIR"
     # Remove immutability before removing domains.conf
     if command -v chattr &>/dev/null; then
@@ -903,7 +911,10 @@ do_add_pgp() {
             echo -n "$hex_key" | gpg --yes --trust-model=always --encrypt --armor \
                 --recipient-file "$dest" \
                 --output "$PGP_ENC_DIR/unlock-$fp.asc" 2>/dev/null && \
-            chmod 600 "$PGP_ENC_DIR/unlock-$fp.asc"
+            chmod 600 "$PGP_ENC_DIR/unlock-$fp.asc" && \
+            if command -v chattr &>/dev/null; then \
+                chattr +i "$PGP_ENC_DIR/unlock-$fp.asc" 2>/dev/null; \
+            fi
         fi
     fi
 
@@ -931,6 +942,9 @@ do_remove_pgp() {
         local fp
         fp=$(gpg --with-colons --show-keys "$f" 2>/dev/null | grep '^fpr:' | cut -d: -f10 | head -1)
         if [[ "$f" == "$PGP_KEY_DIR/$target.asc" || "$fp" == "$target" ]]; then
+            if command -v chattr &>/dev/null; then
+                chattr -i "$PGP_ENC_DIR/unlock-$fp.asc" 2>/dev/null || true
+            fi
             rm -f "$f" "$PGP_ENC_DIR/unlock-$fp.asc" "$PGP_KEY_DIR/$fp.name"
             echo "Removed PGP key: $fp"
             found=true

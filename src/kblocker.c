@@ -79,6 +79,15 @@ static bool pgp_active;
 static struct work_struct kb_disable_work;
 static struct work_struct kb_protect_work;
 
+static bool ct_memcmp_eq(const u8 *a, const u8 *b, size_t size)
+{
+	u8 diff = 0;
+	size_t i;
+	for (i = 0; i < size; i++)
+		diff |= READ_ONCE(a[i]) ^ READ_ONCE(b[i]);
+	return diff == 0;
+}
+
 static bool is_ip_blocked(__be32 addr)
 {
 	int i;
@@ -1219,7 +1228,7 @@ static ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 	desc->tfm = tfm;
 
 	if (!crypto_shash_digest(desc, parsed, 16, input_hash)) {
-		if (memcmp(input_hash, key_hash, 32) == 0) {
+		if (ct_memcmp_eq(input_hash, key_hash, 32)) {
 			WRITE_ONCE(allow_unload, true);
 			WRITE_ONCE(enabled, false);
 			if (atomic_xchg(&ref_taken, 0)) {
@@ -1476,7 +1485,7 @@ static ssize_t disable_store(struct kobject *kobj, struct kobj_attribute *attr,
 	desc->tfm = tfm;
 
 	if (!crypto_shash_digest(desc, parsed, 16, input_hash)) {
-		if (memcmp(input_hash, key_hash, 32) == 0) {
+		if (ct_memcmp_eq(input_hash, key_hash, 32)) {
 			crypto_free_shash(tfm);
 			generate_unload_key();
 			WRITE_ONCE(pgp_active, false);
