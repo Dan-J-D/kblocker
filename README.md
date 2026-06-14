@@ -1,14 +1,14 @@
 # kblocker
 
-A kernel-level internet blocker designed to remove your ability to break your own focus. Once enabled, it blocks access to configured domains by dropping matching TCP connections via netfilter and null-routing them via `/etc/hosts`. The key needed to disable or unload the module can be encrypted to trusted recipients and erased from kernel memory — making the decision to unblock a deliberate, collaborative act rather than an impulse.
+A kernel-level internet blocker designed to remove your ability to break your own focus. Once enabled, it blocks access to configured domains by dropping matching TCP connections via netfilter and null-routing them via `/etc/hosts`. The key needed to disable or unload the module can be encrypted to trusted recipients and erased from kernel memory, making the decision to unblock a deliberate, collaborative act rather than an impulse.
 
 ## Use case
 
-You want to block distracting sites and make it *genuinely hard* to disable the blocker — even for yourself. The goal isn't just to block, but to remove your own agency to undo it in a moment of weakness.
+You want to block distracting sites and make it *genuinely hard* to disable the blocker even for yourself. The goal isn't just to block, but to remove your own agency to undo it in a moment of weakness.
 
 - The kernel module hooks `NF_INET_LOCAL_OUT` and `NF_INET_FORWARD`, inspects TLS SNI, and drops matching connections
 - Disabling or unloading requires a 128-bit key, validated against a SHA-256 hash stored in the kernel
-- With PGP mode, the key is encrypted to your trusted recipients' GPG public keys and then **erased from kernel memory** — the only way to retrieve it is to have someone else PGP-decrypt it. You've outsourced your willpower.
+- With PGP mode, the key is encrypted to your trusted recipients' GPG public keys and then **erased from kernel memory**. The only way to retrieve it is to have someone else PGP-decrypt it. You've outsourced your willpower.
 - The module file, auto-load config, hosts file, and domains config are protected with `chattr +i` (immutable) and `inode_operations` overrides, re-applied every second
 
 ## Quick start
@@ -35,7 +35,7 @@ sudo kblockerctl unload
 
 ## PGP mode
 
-Without PGP, the unload key is readable from `/sys/kernel/kblocker/key` — anyone with root can retrieve it and disable the blocker. PGP mode encrypts the key to trusted recipients so that:
+Without PGP, the unload key is readable from `/sys/kernel/kblocker/key`. Anyone with root can retrieve it and disable the blocker. PGP mode encrypts the key to trusted recipients so that:
 
 1. On `enable`, kblockerctl reads the key from sysfs, GPG-encrypts it for all registered public keys, and signals the kernel to zero the key from memory
 2. The `key` sysfs attribute returns `"encrypted"` instead of the raw hex
@@ -57,7 +57,7 @@ sudo kblockerctl unload
 
 ### Web UI: Browser-based PGP key management
 
-Generate PGP keys entirely in your browser (using OpenPGP.js) — the private key never touches the server:
+Generate PGP keys entirely in your browser (using OpenPGP.js). The private key never touches the server:
 
 ```sh
 # start web UI for key generation
