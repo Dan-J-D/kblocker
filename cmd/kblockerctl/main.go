@@ -1469,7 +1469,7 @@ func doUnblockWeb(args []string) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", serveUnblockIndex)
-	mux.HandleFunc("/api/ciphertext/", handleAPICiphertext)
+	mux.HandleFunc("/api/ciphertext-by-key", handleAPICiphertextByKey)
 	mux.HandleFunc("/api/unblock", handleAPIUnblock)
 	mux.HandleFunc("/api/status", handleAPISStatus)
 
@@ -1717,12 +1717,18 @@ document.getElementById('upload-pub-btn').addEventListener('click', async functi
   if (!generatedPubKey) return;
   var name = document.getElementById('key-name').value.trim();
   try {
-    await fetch('/api/keys', {
+    var resp = await fetch('/api/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ public_key: generatedPubKey, name: name })
     });
-    showSuccess('Public key uploaded!');
+    if (!resp.ok) {
+      var err = await resp.text();
+      throw new Error(err);
+    }
+    var result = await resp.json();
+    showSuccess('Public key uploaded! Fingerprint: ' + (result.fingerprint || '(unknown)'));
+    document.getElementById('key-fingerprint-display').textContent = 'Server fingerprint: ' + (result.fingerprint || generatedFP);
   } catch (e) {
     showError('Upload failed: ' + e.message);
   }
@@ -2190,13 +2196,19 @@ async function doUnblock() {
 
   try {
     var privKey = await openpgp.readPrivateKey({ armoredKey: armored });
-    var fp = privKey.getFingerprint().toUpperCase();
-    fpEl.textContent = 'Fingerprint: ' + fp;
-    fpEl.className = 'fingerprint-display';
 
-    progress.textContent = 'Fetching encrypted ciphertext...';
+    progress.textContent = 'Extracting public key...';
 
-    var cipherResp = await fetch('/api/ciphertext/' + fp);
+    var pubKey = privKey.toPublic();
+    var pubArmored = await pubKey.armor();
+
+    progress.textContent = 'Looking up ciphertext for this key...';
+
+    var cipherResp = await fetch('/api/ciphertext-by-key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_key: pubArmored })
+    });
     if (!cipherResp.ok) {
       var errText = await cipherResp.text();
       throw new Error('No ciphertext found for this key: ' + errText);
@@ -2288,6 +2300,65 @@ func serveUnblockIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	tmpl := template.Must(template.New("unblock").Parse(unblockHTML))
 	tmpl.Execute(w, nil)
+}
+
+func handleAPICiphertextByKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.PublicKey == "" {
+		http.Error(w, "public_key is required", http.StatusBadRequest)
+		return
+	}
+
+	tmpFile, err := os.CreateTemp("", "kblocker-unlock-*.asc")
+	if err != nil {
+		http.Error(w, "Failed to process key", http.StatusInternalServerError)
+		return
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	tmpFile.WriteString(req.PublicKey)
+	tmpFile.Close()
+
+	cmd := exec.Command("gpg", "--with-colons", "--show-keys", tmpPath)
+	out, err := cmd.Output()
+	if err != nil {
+		http.Error(w, "Invalid PGP public key", http.StatusBadRequest)
+		return
+	}
+
+	var fp string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) >= 10 && fields[0] == "fpr" && fields[9] != "" {
+			fp = fields[9]
+			break
+		}
+	}
+	if fp == "" || !hexFPRegex.MatchString(fp) {
+		http.Error(w, "Could not read valid fingerprint from key", http.StatusBadRequest)
+		return
+	}
+
+	encFile := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
+	data, err := os.ReadFile(encFile)
+	if err != nil {
+		http.Error(w, "No ciphertext found for this key", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/pgp-encrypted")
+	w.Write(data)
 }
 
 func handleAPICiphertext(w http.ResponseWriter, r *http.Request) {
