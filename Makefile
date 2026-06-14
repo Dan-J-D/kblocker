@@ -83,6 +83,9 @@ uninstall:
 			chattr -i "$$f" 2>/dev/null || true; \
 		fi; \
 	done
+	@if [ -d /var/lib/kblocker ]; then \
+		find /var/lib/kblocker -type f -exec chattr -i {} \; 2>/dev/null || true; \
+	fi
 	rm -f $(DESTDIR)/etc/modules-load.d/kblocker.conf
 	rm -f $(DESTDIR)/usr/local/bin/kblockerctl
 	@KO_FILE="$(DESTDIR)/lib/modules/$(shell uname -r)/extra/kblocker.ko"; \

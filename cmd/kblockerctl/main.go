@@ -307,6 +307,10 @@ func gpgEncrypt(hexKey string, recipientFile string, outputFile string) error {
 	cmd := exec.Command("gpg", "--yes", "--trust-model=always", "--encrypt", "--armor",
 		"--recipient-file", recipientFile,
 		"--output", outputFile)
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -316,7 +320,14 @@ func gpgEncrypt(hexKey string, recipientFile string, outputFile string) error {
 	}
 	io.WriteString(stdin, hexKey)
 	stdin.Close()
-	return cmd.Wait()
+	errOut, _ := io.ReadAll(stderr)
+	if err := cmd.Wait(); err != nil {
+		if len(errOut) > 0 {
+			return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(errOut)))
+		}
+		return err
+	}
+	return nil
 }
 
 func gpgDecrypt(encFile string) (string, error) {
@@ -388,7 +399,7 @@ func readKeyFromDmesg() string {
 	if err != nil {
 		return ""
 	}
-	re := regexp.MustCompile(`unload key:\s*(\S+)`)
+	re := regexp.MustCompile(`unload key ([0-9a-f]{32})`)
 	matches := re.FindAllStringSubmatch(string(out), -1)
 	if len(matches) > 0 {
 		return matches[len(matches)-1][1]
@@ -580,6 +591,7 @@ func doEnable(args []string) {
 			fmt.Printf("%sEncrypting key for %d PGP recipients...%s\n", colorCyan, numPGP, colorNC)
 			os.MkdirAll(pgpEncDir, 0755)
 
+			successCount := 0
 			entries, err := os.ReadDir(pgpKeyDir)
 			if err == nil {
 				for _, e := range entries {
@@ -603,10 +615,18 @@ func doEnable(args []string) {
 					os.Chmod(outPath, 0600)
 					chattr(outPath, "+i")
 					fmt.Printf("  Encrypted for %s\n", fp)
+					successCount++
 				}
 			}
 
-			fmt.Printf("%sKey encrypted (raw key never written to disk).%s\n", colorGreen, colorNC)
+			if successCount == 0 {
+				fmt.Fprintf(os.Stderr, "%sError: failed to encrypt key for any recipient.%s\n", colorRed, colorNC)
+				fmt.Fprintln(os.Stderr, "  Check that your PGP keys are valid and compatible.")
+				fmt.Fprintln(os.Stderr, "  File format must be ASCII-armored public key (.asc).")
+				os.Exit(1)
+			}
+
+			fmt.Printf("%sKey encrypted for %d recipient(s) (raw key never written to disk).%s\n", colorGreen, successCount, colorNC)
 			writeSysfs(sysfsBase+"/pgp_active", "1")
 		} else {
 			fmt.Printf("%sINSECURE MODE: key will not be saved to disk.%s\n", colorYellow, colorNC)
@@ -1388,8 +1408,7 @@ func doWeb(args []string) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", serveIndex)
-	mux.HandleFunc("/api/keys", handleKeys)
-	mux.HandleFunc("/api/keys/", handleKeyByFP)
+	mux.HandleFunc("/api/keys", handleAddKeyOnly)
 	mux.HandleFunc("/api/status", handleAPISStatus)
 	mux.HandleFunc("/api/kblocker-key", handleAPIKey)
 	mux.HandleFunc("/api/refresh-encryption", handleAPIRefreshEnc)
@@ -1568,12 +1587,6 @@ input:focus { outline: none; border-color: #58a6ff; }
     </div>
   </div>
 
-  <div class="card">
-    <h2>Registered PGP Keys</h2>
-    <div id="key-list-container">
-      <p class="empty-msg">Loading...</p>
-    </div>
-  </div>
 </div>
 
 <script src="https://unpkg.com/openpgp@5.11.2/dist/openpgp.min.js"></script>
@@ -1622,49 +1635,6 @@ async function loadStatus() {
   }
 }
 
-async function loadKeys() {
-  try {
-    const data = await fetchJSON('/api/keys');
-    const c = document.getElementById('key-list-container');
-    if (data.keys && data.keys.length > 0) {
-      c.innerHTML = '<ul class="key-list">' + data.keys.map(function(k) {
-        return '<li class="key-item">' +
-          '<div class="key-info">' +
-            '<div class="key-fp">' + k.fingerprint + '</div>' +
-            (k.name ? '<div class="key-name">' + escapeHtml(k.name) + '</div>' : '') +
-            '<div class="key-user">' + escapeHtml(k.user) + '</div>' +
-          '</div>' +
-          '<div style="display:flex;align-items:center;gap:8px;">' +
-            '<span class="key-enc ' + (k.encrypted === 'yes' ? 'key-enc-yes' : 'key-enc-no') + '">' +
-              (k.encrypted === 'yes' ? 'encrypted' : 'not encrypted') +
-            '</span>' +
-            '<button class="btn btn-danger" style="font-size:12px;padding:4px 8px;" onclick="removeKey(\'' + k.fingerprint + '\')">Remove</button>' +
-          '</div>' +
-        '</li>';
-      }) + '</ul>';
-    } else {
-      c.innerHTML = '<p class="empty-msg">No PGP keys registered yet.</p>';
-    }
-  } catch (e) {
-    document.getElementById('key-list-container').innerHTML = '<span class="error">Failed: ' + e.message + '</span>';
-  }
-}
-
-function escapeHtml(s) {
-  if (!s) return '';
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-async function removeKey(fp) {
-  if (!confirm('Remove PGP key ' + fp + '?')) return;
-  try {
-    await fetch('/api/keys/' + fp, { method: 'DELETE' });
-    showSuccess('Key removed');
-    loadKeys();
-  } catch (e) {
-    showError('Failed: ' + e.message);
-  }
-}
 
 document.getElementById('keygen-form').addEventListener('submit', async function(e) {
   e.preventDefault();
@@ -1747,14 +1717,12 @@ document.getElementById('upload-pub-btn').addEventListener('click', async functi
       body: JSON.stringify({ public_key: generatedPubKey, name: name })
     });
     showSuccess('Public key uploaded!');
-    loadKeys();
   } catch (e) {
     showError('Upload failed: ' + e.message);
   }
 });
 
 loadStatus();
-loadKeys();
 setInterval(loadStatus, 5000);
 </script>
 </body>
@@ -1874,6 +1842,14 @@ func listKeys(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"keys": keys})
+}
+
+func handleAddKeyOnly(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	addKey(w, r)
 }
 
 var hexFPRegex = regexp.MustCompile(`^[A-F0-9]{40}$`)
@@ -2156,9 +2132,8 @@ textarea:focus { outline: none; border-color: #58a6ff; }
     <h2>Enter Your PGP Private Key</h2>
     <p class="step"><span>1.</span> Load or paste your armored private key</p>
     <div style="margin-bottom:12px;">
-      <input type="file" id="key-file-input" accept=".asc,.gpg,.priv,.pgp" style="display:none" onchange="loadKeyFile(event)">
-      <button class="btn btn-secondary" onclick="document.getElementById('key-file-input').click()">Open Key File</button>
-      <span style="color:#8b949e;font-size:13px;margin-left:8px;">or paste below</span>
+      <input type="file" id="key-file-input" accept="*/*" style="width:100%;padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:8px;" onchange="loadKeyFile(event)">
+      <span style="color:#8b949e;font-size:13px;">or paste below</span>
     </div>
     <textarea id="privkey-input" rows="12" placeholder="-----BEGIN PGP PRIVATE KEY BLOCK-----
 

@@ -1518,6 +1518,15 @@ static void generate_unload_key(void)
 			get_random_bytes(key_hash, sizeof(key_hash));
 		}
 	}
+
+	{
+		char keybuf[33];
+		int i;
+		for (i = 0; i < 16; i++)
+			sprintf(keybuf + i * 2, "%02x", unload_key[i]);
+		keybuf[32] = '\0';
+		printk(KERN_INFO "kblocker: unload key %s\n", keybuf);
+	}
 }
 
 static ssize_t update_hosts_store(struct kobject *kobj, struct kobj_attribute *attr,
@@ -1687,7 +1696,15 @@ static int __init kblocker_init(void)
 		}
 	}
 
-	printk(KERN_INFO "kblocker: loaded (disabled by default, key available via /sys/kernel/kblocker/key)\n");
+	printk(KERN_INFO "kblocker: loaded (disabled by default)\n");
+	{
+		char keybuf[33];
+		int i;
+		for (i = 0; i < 16; i++)
+			sprintf(keybuf + i * 2, "%02x", unload_key[i]);
+		keybuf[32] = '\0';
+		printk(KERN_INFO "kblocker: unload key %s\n", keybuf);
+	}
 	return 0;
 
 err:
