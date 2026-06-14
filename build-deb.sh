@@ -11,6 +11,9 @@ if [ ! -d "/lib/modules/$KERNEL_VER/build" ]; then
     exit 1
 fi
 
+echo "==> Building Makefile"
+make
+
 echo "==> Building kernel module..."
 make -C /lib/modules/$KERNEL_VER/build M=$PWD modules
 
