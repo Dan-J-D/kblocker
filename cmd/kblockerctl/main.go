@@ -607,8 +607,10 @@ func doEnable(args []string) {
 					if err != nil || fp == "" {
 						continue
 					}
-					outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
-					if err := gpgEncrypt(hexKey, keyPath, outPath); err != nil {
+				outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
+				chattr(outPath, "-i")
+				os.Remove(outPath)
+				if err := gpgEncrypt(hexKey, keyPath, outPath); err != nil {
 						fmt.Fprintf(os.Stderr, "  Failed to encrypt for %s: %v\n", fp, err)
 						continue
 					}
@@ -957,6 +959,8 @@ func doReload() {
 					continue
 				}
 				outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
+				chattr(outPath, "-i")
+				os.Remove(outPath)
 				gpgEncrypt(hexKey, keyPath, outPath)
 				os.Chmod(outPath, 0600)
 				chattr(outPath, "+i")
@@ -1202,6 +1206,8 @@ func doAddPGP(args []string) {
 			fmt.Printf("%sEncrypting existing key for new recipient...%s\n", colorCyan, colorNC)
 			os.MkdirAll(pgpEncDir, 0755)
 			outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
+			chattr(outPath, "-i")
+			os.Remove(outPath)
 			if err := gpgEncrypt(hexKey, dest, outPath); err == nil {
 				os.Chmod(outPath, 0600)
 				chattr(outPath, "+i")
