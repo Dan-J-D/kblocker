@@ -1311,22 +1311,6 @@ static void try_restore_state_from_disk(void)
 		return;
 	}
 
-	p = strstr(buf, "key_hash:");
-	if (p) {
-		p += 9;
-		end = strchr(p, '\n');
-		if (end && (end - p) == 64 && !hex_decode(p, hash, 32)) {
-			p = strstr(buf, "expiry:");
-			if (p) {
-				p += 7;
-				expiry = simple_strtoull(p, &end, 0);
-				if (end != p) {
-					do_restore(hash, expiry);
-				}
-			}
-		}
-	}
-
 	p = strstr(buf, "domains:");
 	if (p) {
 		p += 8;
@@ -1389,6 +1373,22 @@ static void try_restore_state_from_disk(void)
 				kfree(tmp_v4);
 				kfree(tmp_v6);
 				kfree(orig);
+			}
+		}
+	}
+
+	p = strstr(buf, "key_hash:");
+	if (p) {
+		p += 9;
+		end = strchr(p, '\n');
+		if (end && (end - p) == 64 && !hex_decode(p, hash, 32)) {
+			p = strstr(buf, "expiry:");
+			if (p) {
+				p += 7;
+				expiry = simple_strtoull(p, &end, 0);
+				if (end != p) {
+					do_restore(hash, expiry);
+				}
 			}
 		}
 	}

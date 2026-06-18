@@ -1587,7 +1587,6 @@ input:focus { outline: none; border-color: #58a6ff; }
       <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn btn-secondary" id="download-priv-btn">Download Private Key</button>
         <button class="btn btn-secondary" id="download-pub-btn">Download Public Key</button>
-        <button class="btn btn-primary" id="upload-pub-btn">Upload Public Key</button>
       </div>
       <p style="color:#8b949e;font-size:12px;margin-top:8px;" id="key-fingerprint-display"></p>
     </div>
@@ -1671,14 +1670,25 @@ document.getElementById('keygen-form').addEventListener('submit', async function
     generatedPrivKey = pair.privateKey;
     generatedPubKey = pair.publicKey;
 
-    var pub = await openpgp.readKey({ armoredKey: pair.publicKey });
-    generatedFP = pub.getFingerprint().toUpperCase();
-
-    document.getElementById('key-fingerprint-display').textContent = 'Fingerprint: ' + generatedFP;
     document.getElementById('generate-result').className = '';
-    showSuccess('Key pair generated!');
+    showSuccess('Key pair generated! Uploading to server...');
+
+    var resp = await fetch('/api/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_key: generatedPubKey, name: name })
+    });
+    if (!resp.ok) {
+      var err = await resp.text();
+      showError('Upload failed: ' + err);
+      return;
+    }
+    var result = await resp.json();
+    generatedFP = result.fingerprint;
+    document.getElementById('key-fingerprint-display').textContent = 'Fingerprint: ' + generatedFP;
+    showSuccess('Key uploaded and registered!');
   } catch (err) {
-    showError('Generation failed: ' + err.message);
+    showError('Failed: ' + err.message);
   } finally {
     btn.disabled = false;
     btn.textContent = 'Generate Key Pair';
@@ -1711,27 +1721,6 @@ document.getElementById('download-pub-btn').addEventListener('click', function()
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
   showSuccess('Public key downloaded! Save it somewhere safe to decrypt the unload key later.');
-});
-
-document.getElementById('upload-pub-btn').addEventListener('click', async function() {
-  if (!generatedPubKey) return;
-  var name = document.getElementById('key-name').value.trim();
-  try {
-    var resp = await fetch('/api/keys', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ public_key: generatedPubKey, name: name })
-    });
-    if (!resp.ok) {
-      var err = await resp.text();
-      throw new Error(err);
-    }
-    var result = await resp.json();
-    showSuccess('Public key uploaded! Fingerprint: ' + (result.fingerprint || '(unknown)'));
-    document.getElementById('key-fingerprint-display').textContent = 'Server fingerprint: ' + (result.fingerprint || generatedFP);
-  } catch (e) {
-    showError('Upload failed: ' + e.message);
-  }
 });
 
 loadStatus();
