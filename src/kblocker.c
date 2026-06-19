@@ -395,6 +395,7 @@ static void enable_timer_cb(struct timer_list *t)
 		expiry_jiffies = 0;
 		expiry_seconds = 0;
 		WRITE_ONCE(state_restored, false);
+		WRITE_ONCE(pgp_active, false);
 		if (atomic_xchg(&ref_taken, 0))
 			module_put(THIS_MODULE);
 		printk(KERN_INFO "kblocker: timer-expired, disabling\n");

@@ -648,6 +648,18 @@ func doEnable(args []string) {
 	fmt.Printf("%sBlocking enabled for %d minutes.%s\n", colorGreen, minutes, colorNC)
 }
 
+func cleanupPGPCiphertexts() {
+	entries, err := os.ReadDir(pgpEncDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		p := filepath.Join(pgpEncDir, e.Name())
+		chattr(p, "-i")
+		os.Remove(p)
+	}
+}
+
 func doDisable() {
 	requiresRoot()
 
@@ -659,6 +671,7 @@ func doDisable() {
 	writeSysfs(sysfsBase+"/enabled", "0")
 	chattr(stateFile, "-i")
 	os.Remove(stateFile)
+	cleanupPGPCiphertexts()
 
 	fmt.Printf("%sBlocking disabled. Module still loaded.%s\n", colorGreen, colorNC)
 }
@@ -738,6 +751,10 @@ func doUnblock(args []string) {
 	} else {
 		writeSysfs(sysfsBase+"/enabled", "0")
 	}
+
+	chattr(stateFile, "-i")
+	os.Remove(stateFile)
+	cleanupPGPCiphertexts()
 
 	fmt.Printf("%sBlocking disabled. Module still loaded.%s\n", colorGreen, colorNC)
 }
@@ -839,6 +856,10 @@ func doStatus() {
 	}
 
 	enabledState := parseField("enabled")
+
+	if enabledState == "0" {
+		cleanupPGPCiphertexts()
+	}
 	remaining := parseField("remaining")
 	countV4 := parseField("blocked_ips_v4")
 	countV6 := parseField("blocked_ips_v6")
