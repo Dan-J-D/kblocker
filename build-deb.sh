@@ -21,7 +21,7 @@ PKG_DIR="$PWD/debian/kblocker"
 DEB_DIR="$PKG_DIR/DEBIAN"
 
 echo "==> Staging package files..."
-rm -rf "$PKG_DIR"
+sudo rm -rf "$PKG_DIR" 2>/dev/null || rm -rf "$PKG_DIR"
 
 install -d "$PKG_DIR/lib/modules/$KERNEL_VER/extra"
 install -m 644 kblocker.ko "$PKG_DIR/lib/modules/$KERNEL_VER/extra/"
