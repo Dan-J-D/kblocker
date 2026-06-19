@@ -57,6 +57,13 @@ else
     exit 1
 fi
 
+if make kblockerctl &>/dev/null; then
+    ok "kblockerctl builds"
+else
+    fail "kblockerctl builds"
+    exit 1
+fi
+
 # --- Load ---
 echo "--- Load ---"
 if insmod kblocker.ko 2>/dev/null; then
