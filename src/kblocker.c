@@ -1505,28 +1505,19 @@ static ssize_t disable_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 static void generate_unload_key(void)
 {
+	struct crypto_shash *tfm;
+	SHASH_DESC_ON_STACK(desc, tfm);
+
 	get_random_bytes(unload_key, sizeof(unload_key));
 
-	{
-		struct crypto_shash *tfm = crypto_alloc_shash("sha256", 0, 0);
-		if (!IS_ERR(tfm)) {
-			SHASH_DESC_ON_STACK(desc, tfm);
-			desc->tfm = tfm;
-			if (crypto_shash_digest(desc, unload_key, 16, key_hash))
-				get_random_bytes(key_hash, sizeof(key_hash));
-			crypto_free_shash(tfm);
-		} else {
+	tfm = crypto_alloc_shash("sha256", 0, 0);
+	if (!IS_ERR(tfm)) {
+		desc->tfm = tfm;
+		if (crypto_shash_digest(desc, unload_key, 16, key_hash))
 			get_random_bytes(key_hash, sizeof(key_hash));
-		}
-	}
-
-	{
-		char keybuf[33];
-		int i;
-		for (i = 0; i < 16; i++)
-			sprintf(keybuf + i * 2, "%02x", unload_key[i]);
-		keybuf[32] = '\0';
-		printk(KERN_INFO "kblocker: unload key %s\n", keybuf);
+		crypto_free_shash(tfm);
+	} else {
+		get_random_bytes(key_hash, sizeof(key_hash));
 	}
 }
 
@@ -1698,14 +1689,6 @@ static int __init kblocker_init(void)
 	}
 
 	printk(KERN_INFO "kblocker: loaded (disabled by default)\n");
-	{
-		char keybuf[33];
-		int i;
-		for (i = 0; i < 16; i++)
-			sprintf(keybuf + i * 2, "%02x", unload_key[i]);
-		keybuf[32] = '\0';
-		printk(KERN_INFO "kblocker: unload key %s\n", keybuf);
-	}
 	return 0;
 
 err:
