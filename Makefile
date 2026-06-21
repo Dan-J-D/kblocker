@@ -5,15 +5,18 @@ KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 DESTDIR ?=
 
-all: kblockerctl
+all: kblockerctl kfuzz
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
 
 kblockerctl: cmd/kblockerctl/main.go
-	cd cmd/kblockerctl && go build -o ../../kblockerctl .
+	go build -o kblockerctl cmd/kblockerctl/main.go
+
+kfuzz: cmd/fuzz/main.go
+	go build -o kfuzz cmd/fuzz/main.go
 
 clean:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
-	rm -f src/*.o src/*.ko src/*.mod.c Module.symvers modules.order kblockerctl
+	rm -f src/*.o src/*.ko src/*.mod.c Module.symvers modules.order kblockerctl kfuzz
 
 install: all
 	@if [ "$(shell id -u)" -ne 0 ]; then \
@@ -105,5 +108,8 @@ test:
 	else \
 		exec ./test.sh; \
 	fi
+
+%:
+	@:
 
 .PHONY: all clean install uninstall test kblockerctl

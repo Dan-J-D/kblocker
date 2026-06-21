@@ -384,6 +384,7 @@ static unsigned int kblocker_hook_v6(unsigned int hooknum, struct sk_buff *skb,
 static void enable_blocking(unsigned int seconds);
 static int update_hosts_file(void);
 static void do_disable_work(struct work_struct *work);
+static void generate_unload_key(void);
 
 static void enable_timer_cb(struct timer_list *t)
 {
@@ -408,6 +409,7 @@ static void enable_timer_cb(struct timer_list *t)
 
 static void enable_blocking(unsigned int seconds)
 {
+	generate_unload_key();
 	WRITE_ONCE(enabled, true);
 	expiry_seconds = ktime_get_real_seconds() + seconds;
 	expiry_jiffies = jiffies + msecs_to_jiffies((unsigned long)seconds * 1000);
@@ -1269,6 +1271,8 @@ static ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 	struct crypto_shash *tfm;
 
 	if (count < 32) return -EINVAL;
+	if (buf[count - 1] == '\n') count--;
+	if (count != 32) return -EINVAL;
 	if (hex_decode(buf, parsed, 16)) return -EINVAL;
 
 	tfm = crypto_alloc_shash("sha256", 0, 0);
@@ -1510,8 +1514,6 @@ static ssize_t pgp_active_store(struct kobject *kobj, struct kobj_attribute *att
 	return count;
 }
 
-static void generate_unload_key(void);
-
 static ssize_t disable_store(struct kobject *kobj, struct kobj_attribute *attr,
 			     const char *buf, size_t count)
 {
@@ -1524,6 +1526,8 @@ static ssize_t disable_store(struct kobject *kobj, struct kobj_attribute *attr,
 	struct crypto_shash *tfm;
 
 	if (count < 32) return -EINVAL;
+	if (buf[count - 1] == '\n') count--;
+	if (count != 32) return -EINVAL;
 	if (hex_decode(buf, parsed, 16)) return -EINVAL;
 
 	tfm = crypto_alloc_shash("sha256", 0, 0);

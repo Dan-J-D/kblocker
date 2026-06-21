@@ -352,8 +352,8 @@ func pgpKeyFingerprints(dir string) []string {
 		if !strings.HasSuffix(name, ".asc") && !strings.HasSuffix(name, ".gpg") && !strings.HasSuffix(name, ".pub") {
 			continue
 		}
-		fp, _, err := gpgShowKeys(filepath.Join(dir, name))
-		if err == nil && fp != "" {
+		fp := fpFromFilename(name)
+		if fp != "" && hexFPRegex.MatchString(fp) {
 			fps = append(fps, fp)
 		}
 	}
@@ -366,6 +366,15 @@ func pgpKeyName(fp string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+func fpFromFilename(name string) string {
+	for _, ext := range []string{".asc", ".gpg", ".pub"} {
+		if strings.HasSuffix(name, ext) {
+			return name[:len(name)-len(ext)]
+		}
+	}
+	return ""
 }
 
 func pgpCount(dir string) int {
@@ -547,6 +556,9 @@ func doEnable(args []string) {
 	insecure := false
 	minutes := 60
 
+	// Clean up stale PGP ciphertexts from a prior expired session
+	cleanupPGPCiphertexts()
+
 	for _, a := range args {
 		if a == "--insecure" {
 			insecure = true
@@ -602,11 +614,11 @@ func doEnable(args []string) {
 					if !strings.HasSuffix(name, ".asc") && !strings.HasSuffix(name, ".gpg") && !strings.HasSuffix(name, ".pub") {
 						continue
 					}
-					keyPath := filepath.Join(pgpKeyDir, name)
-					fp, _, err := gpgShowKeys(keyPath)
-					if err != nil || fp == "" {
+					fp := fpFromFilename(name)
+					if fp == "" || !hexFPRegex.MatchString(fp) {
 						continue
 					}
+					keyPath := filepath.Join(pgpKeyDir, name)
 				outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
 				chattr(outPath, "-i")
 				os.Remove(outPath)
@@ -857,9 +869,6 @@ func doStatus() {
 
 	enabledState := parseField("enabled")
 
-	if enabledState == "0" {
-		cleanupPGPCiphertexts()
-	}
 	remaining := parseField("remaining")
 	countV4 := parseField("blocked_ips_v4")
 	countV6 := parseField("blocked_ips_v6")
@@ -974,11 +983,11 @@ func doReload() {
 				if !strings.HasSuffix(name, ".asc") && !strings.HasSuffix(name, ".gpg") && !strings.HasSuffix(name, ".pub") {
 					continue
 				}
-				keyPath := filepath.Join(pgpKeyDir, name)
-				fp, _, err := gpgShowKeys(keyPath)
-				if err != nil || fp == "" {
+				fp := fpFromFilename(name)
+				if fp == "" || !hexFPRegex.MatchString(fp) {
 					continue
 				}
+				keyPath := filepath.Join(pgpKeyDir, name)
 				outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
 				chattr(outPath, "-i")
 				os.Remove(outPath)
@@ -1271,11 +1280,11 @@ func doRemovePGP(args []string) {
 		if !strings.HasSuffix(name, ".asc") && !strings.HasSuffix(name, ".gpg") && !strings.HasSuffix(name, ".pub") {
 			continue
 		}
-		fp, _, err := gpgShowKeys(filepath.Join(pgpKeyDir, name))
-		if err != nil {
+		fp := fpFromFilename(name)
+		if fp == "" || !hexFPRegex.MatchString(fp) {
 			continue
 		}
-		if name == target+".asc" || fp == target {
+		if strings.EqualFold(name, target+".asc") || strings.EqualFold(name, target+".gpg") || strings.EqualFold(name, target+".pub") || strings.EqualFold(fp, target) {
 			encFile := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
 			chattr(encFile, "-i")
 			os.Remove(encFile)
@@ -1690,6 +1699,8 @@ document.getElementById('keygen-form').addEventListener('submit', async function
 
     generatedPrivKey = pair.privateKey;
     generatedPubKey = pair.publicKey;
+    var pubKey = await openpgp.readKey({ armoredKey: generatedPubKey });
+    var fp = pubKey.getFingerprint().toUpperCase();
 
     document.getElementById('generate-result').className = '';
     showSuccess('Key pair generated! Uploading to server...');
@@ -1697,7 +1708,7 @@ document.getElementById('keygen-form').addEventListener('submit', async function
     var resp = await fetch('/api/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ public_key: generatedPubKey, name: name })
+      body: JSON.stringify({ public_key: generatedPubKey, name: name, fingerprint: fp })
     });
     if (!resp.ok) {
       var err = await resp.text();
@@ -1884,8 +1895,9 @@ func addKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		PublicKey string `json:"public_key"`
-		Name      string `json:"name"`
+		PublicKey   string `json:"public_key"`
+		Name        string `json:"name"`
+		Fingerprint string `json:"fingerprint"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -1917,17 +1929,22 @@ func addKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var fp string
+	var gpgFP string
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Split(line, ":")
 		if len(fields) >= 10 && fields[0] == "fpr" && fields[9] != "" {
-			fp = fields[9]
+			gpgFP = fields[9]
 			break
 		}
 	}
-	if fp == "" || !hexFPRegex.MatchString(fp) {
+	if gpgFP == "" || !hexFPRegex.MatchString(gpgFP) {
 		http.Error(w, "Could not read valid fingerprint from key", http.StatusBadRequest)
 		return
+	}
+
+	fp := gpgFP
+	if req.Fingerprint != "" && hexFPRegex.MatchString(strings.ToUpper(req.Fingerprint)) {
+		fp = strings.ToUpper(req.Fingerprint)
 	}
 
 	os.MkdirAll(pgpKeyDir, 0755)
@@ -2082,12 +2099,11 @@ func handleAPIRefreshEnc(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(name, ".asc") && !strings.HasSuffix(name, ".gpg") && !strings.HasSuffix(name, ".pub") {
 			continue
 		}
-		keyPath := filepath.Join(pgpKeyDir, name)
-		entry, err := readPGPKeyInfo(keyPath)
-		if err != nil || entry == nil || entry.Fingerprint == "" {
+		fp := fpFromFilename(name)
+		if fp == "" || !hexFPRegex.MatchString(fp) {
 			continue
 		}
-		fp := entry.Fingerprint
+		keyPath := filepath.Join(pgpKeyDir, name)
 		outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
 		cmd := exec.Command("gpg", "--yes", "--trust-model=always", "--encrypt", "--armor",
 			"--recipient-file", keyPath, "--output", outPath)
@@ -2211,13 +2227,14 @@ async function doUnblock() {
 
     var pubKey = privKey.toPublic();
     var pubArmored = await pubKey.armor();
+    var fp = pubKey.getFingerprint().toUpperCase();
 
-    progress.textContent = 'Looking up ciphertext for this key...';
+    progress.textContent = 'Looking up ciphertext for this key (' + fp.substring(0,16) + '...)...';
 
     var cipherResp = await fetch('/api/ciphertext-by-key', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ public_key: pubArmored })
+      body: JSON.stringify({ public_key: pubArmored, fingerprint: fp })
     });
     if (!cipherResp.ok) {
       var errText = await cipherResp.text();
@@ -2319,7 +2336,8 @@ func handleAPICiphertextByKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		PublicKey string `json:"public_key"`
+		PublicKey   string `json:"public_key"`
+		Fingerprint string `json:"fingerprint"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -2330,6 +2348,19 @@ func handleAPICiphertextByKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If client provided a fingerprint, use it directly
+	if req.Fingerprint != "" && hexFPRegex.MatchString(strings.ToUpper(req.Fingerprint)) {
+		fp := strings.ToUpper(req.Fingerprint)
+		encFile := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
+		data, err := os.ReadFile(encFile)
+		if err == nil {
+			w.Header().Set("Content-Type", "application/pgp-encrypted")
+			w.Write(data)
+			return
+		}
+	}
+
+	// Fall back to GPG-based fingerprint extraction
 	tmpFile, err := os.CreateTemp("", "kblocker-unlock-*.asc")
 	if err != nil {
 		http.Error(w, "Failed to process key", http.StatusInternalServerError)
