@@ -1,1 +1,14 @@
 kfuzz
+kblockerctl
+*.ko
+*.o
+*.cmd
+*.mod
+*.mod.c
+*.symvers
+Module.symvers
+modules.order
+cmd/kblockerctl/go.mod
+debian/kblocker/
+recipients/keys/
+build/
