@@ -417,6 +417,13 @@ static void enable_blocking(unsigned int seconds)
 	if (!atomic_xchg(&ref_taken, 1)) {
 		__module_get(THIS_MODULE);
 	}
+	/* Re-enable file protection if it was disabled by a prior unblock */
+	WRITE_ONCE(allow_unload, false);
+	if (!timer_active || !timer_pending(&protect_timer)) {
+		mod_timer(&protect_timer,
+			  jiffies + msecs_to_jiffies(PROTECT_INTERVAL_MS));
+		timer_active = true;
+	}
 	update_hosts_file();
 	printk(KERN_INFO "kblocker: enabled for %u seconds\n", seconds);
 }
@@ -842,6 +849,9 @@ static void protect_file(const char *path)
 	int error;
 	int i;
 
+	if (READ_ONCE(kblocker_bypass_protection))
+		return;
+
 	error = kern_path(path, 0, &kp);
 	if (error)
 		return;
@@ -852,8 +862,10 @@ static void protect_file(const char *path)
 
 	inode_lock(inode);
 	for (i = 0; i < num_protected_files; i++) {
-		if (protected_files[i].exists &&
-		    protected_files[i].inode == inode) {
+		if (!protected_files[i].exists)
+			continue;
+		if (protected_files[i].inode == inode) {
+			/* Same inode — just check immutable + i_op */
 			if (inode->i_op != protected_files[i].custom_i_op &&
 			    protected_files[i].custom_i_op) {
 				restore_iop_overrides(inode,
@@ -862,6 +874,24 @@ static void protect_file(const char *path)
 					protected_files[i].orig_i_op,
 					&protected_files[i].custom_i_op);
 			}
+			break;
+		}
+		/* Path resolves to a different inode — inode was evicted and recreated.
+		 * Release the old reference, take a new one, re-install protection. */
+		if (protected_files[i].path[0] &&
+		    strcmp(protected_files[i].path, path) == 0) {
+			iput(protected_files[i].inode);
+			ihold(inode);
+			protected_files[i].inode = inode;
+			protected_files[i].orig_i_op = inode->i_op;
+			if (protected_files[i].custom_i_op) {
+				kfree(protected_files[i].custom_i_op);
+				protected_files[i].custom_i_op = NULL;
+			}
+			install_iop_overrides(inode, inode->i_op,
+				&protected_files[i].custom_i_op);
+			printk(KERN_WARNING "kblocker: re-protected %s (inode changed)\n",
+			       path);
 			break;
 		}
 	}
@@ -1004,13 +1034,16 @@ cleanup_iop:
 
 static u64 remaining_seconds(void)
 {
+	u64 exp;
+
 	if (!READ_ONCE(enabled))
 		return 0;
 
-	if (ktime_get_real_seconds() >= expiry_seconds)
+	exp = READ_ONCE(expiry_seconds);
+	if (!exp || ktime_get_real_seconds() >= exp)
 		return 0;
 
-	return expiry_seconds - ktime_get_real_seconds();
+	return exp - ktime_get_real_seconds();
 }
 
 static ssize_t status_show(struct kobject *kobj, struct kobj_attribute *attr,
@@ -1019,13 +1052,14 @@ static ssize_t status_show(struct kobject *kobj, struct kobj_attribute *attr,
 	u64 rem = remaining_seconds();
 
 	return sprintf(buf, "enabled: %d\nblocked_ips_v4: %d\n"
-		       "blocked_ips_v6: %d\nblocked_domains: %d\n"
+		       "blocked_ips_v6: %d\nblocked_domains: %d\nblock_count: %d\n"
 		       "remaining: %llu\n"
 		       "allow_unload: %d\nprotected_files: %d\n"
 		       "state_restored: %d\n",
 		       READ_ONCE(enabled), READ_ONCE(blocked_count_v4),
 		       READ_ONCE(blocked_count_v6),
 		       READ_ONCE(blocked_domain_count),
+		       READ_ONCE(blocked_count_v4) + READ_ONCE(blocked_count_v6),
 		       rem, READ_ONCE(allow_unload),
 		       num_protected_files, READ_ONCE(state_restored));
 }
@@ -1048,8 +1082,13 @@ static ssize_t enabled_store(struct kobject *kobj, struct kobj_attribute *attr,
 		return -EINVAL;
 
 	if (val == 0) {
-		if (READ_ONCE(pgp_active))
-			return -EPERM;
+		if (READ_ONCE(pgp_active)) {
+			if (READ_ONCE(enabled))
+				return -EPERM;
+			clear_hosts_from_kernel();
+			printk(KERN_INFO "kblocker: cleaned hosts (pgp_active, already disabled)\n");
+			return count;
+		}
 		disable_blocking();
 	} else if (READ_ONCE(pgp_active) && READ_ONCE(enabled)) {
 		return -EPERM;
@@ -1173,8 +1212,11 @@ static ssize_t blocked_domains_store(struct kobject *kobj, struct kobj_attribute
 			if (token[0] == '\0' || token[0] == '#')
 				continue;
 			len = strlen(token);
-			if (len >= MAX_DOMAIN_LEN)
-				len = MAX_DOMAIN_LEN - 1;
+			if (len >= MAX_DOMAIN_LEN) {
+				spin_unlock_bh(&ip_list_lock);
+				kfree(orig);
+				return -EINVAL;
+			}
 			memcpy(blocked_domains[nd], token, len);
 			blocked_domains[nd][len] = '\0';
 			nd++;
@@ -1190,8 +1232,14 @@ static ssize_t blocked_domains_store(struct kobject *kobj, struct kobj_attribute
 static ssize_t block_count_show(struct kobject *kobj, struct kobj_attribute *attr,
 				char *buf)
 {
-	return sprintf(buf, "%d\n",
-		       READ_ONCE(blocked_count_v4) + READ_ONCE(blocked_count_v6));
+	int n4, n6;
+
+	spin_lock_bh(&ip_list_lock);
+	n4 = blocked_count_v4;
+	n6 = blocked_count_v6;
+	spin_unlock_bh(&ip_list_lock);
+
+	return sprintf(buf, "%d\n", n4 + n6);
 }
 
 static int hex_val(char c)
@@ -1242,6 +1290,7 @@ static ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 			WRITE_ONCE(state_restored, false);
 			printk(KERN_INFO "kblocker: unload authorized, auto-disabled\n");
 			crypto_free_shash(tfm);
+			clear_hosts_from_kernel();
 			return count;
 		}
 	}
@@ -1325,9 +1374,7 @@ static void try_restore_state_from_disk(void)
 				spin_lock_bh(&ip_list_lock);
 				while ((token = strsep(&copy, ",")) && nd < MAX_DOMAINS) {
 					int dlen = strlen(token);
-					if (dlen > 0) {
-						if (dlen >= MAX_DOMAIN_LEN)
-							dlen = MAX_DOMAIN_LEN - 1;
+					if (dlen > 0 && dlen < MAX_DOMAIN_LEN) {
 						memcpy(blocked_domains[nd], token, dlen);
 						blocked_domains[nd][dlen] = '\0';
 						nd++;

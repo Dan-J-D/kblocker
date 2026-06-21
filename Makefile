@@ -9,7 +9,6 @@ all: kblockerctl
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
 
 kblockerctl: cmd/kblockerctl/main.go
-	printf 'module kblockerctl\n\ngo 1.21\n' > cmd/kblockerctl/go.mod
 	cd cmd/kblockerctl && go build -o ../../kblockerctl .
 
 clean:

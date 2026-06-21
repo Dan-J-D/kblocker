@@ -4,4 +4,4 @@ set -xe
 
 make clean
 
-rm -rf build/
+rm -rf build/ kfuzz
