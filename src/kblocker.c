@@ -465,23 +465,18 @@ static void log_blocklist_on_disable(void)
 
 static int hosts_clear_immutable(void)
 {
-	struct path kp;
-	struct inode *inode;
-	int was_set = 0;
+	int i, was_set = 0;
 
-	if (kern_path("/etc/hosts", 0, &kp))
-		return 0;
-
-	inode = d_inode(kp.dentry);
-	if (inode) {
-		inode_lock(inode);
-		if (inode->i_flags & S_IMMUTABLE) {
+	for (i = 0; i < num_protected_files; i++) {
+		if (!protected_files[i].exists || !protected_files[i].inode)
+			continue;
+		inode_lock(protected_files[i].inode);
+		if (protected_files[i].inode->i_flags & S_IMMUTABLE) {
 			was_set = 1;
-			inode_set_flags(inode, 0, S_IMMUTABLE);
+			inode_set_flags(protected_files[i].inode, 0, S_IMMUTABLE);
 		}
-		inode_unlock(inode);
+		inode_unlock(protected_files[i].inode);
 	}
-	path_put(&kp);
 	return was_set;
 }
 
@@ -512,11 +507,10 @@ static char *hosts_read_all(struct file *f, loff_t *out_len)
 static void clear_hosts_from_kernel(void)
 {
 	struct file *file;
-	struct path kp;
 	struct inode *inode;
 	char *buf, *out, *p;
 	loff_t len;
-	ssize_t out_len;
+	ssize_t out_len, written;
 	loff_t pos = 0;
 
 	WRITE_ONCE(kblocker_bypass_protection, true);
@@ -537,13 +531,12 @@ static void clear_hosts_from_kernel(void)
 
 	p = strstr(buf, HOSTS_MARKER);
 	if (!p) {
-		printk(KERN_INFO "kblocker: clear_hosts: marker not found, nothing to clear\n");
+		printk(KERN_DEBUG "kblocker: clear_hosts: marker not found\n");
 		kfree(buf);
 		filp_close(file, NULL);
 		WRITE_ONCE(kblocker_bypass_protection, false);
 		return;
 	}
-	printk(KERN_DEBUG "kblocker: clear_hosts: found marker at offset %ld\n", p - buf);
 
 	out_len = p - buf;
 	while (out_len > 0 && buf[out_len - 1] == '\n')
@@ -563,18 +556,26 @@ static void clear_hosts_from_kernel(void)
 	out[out_len] = '\0';
 
 	hosts_clear_immutable();
-	kernel_write(file, out, out_len, &pos);
+	written = kernel_write(file, out, out_len, &pos);
+	if (written != out_len) {
+		printk(KERN_DEBUG "kblocker: clear_hosts write failed (ret=%zd)\n", written);
+		kfree(out);
+		kfree(buf);
+		filp_close(file, NULL);
+		WRITE_ONCE(kblocker_bypass_protection, false);
+		return;
+	}
 
-	if (!kern_path("/etc/hosts", 0, &kp)) {
-		inode = d_inode(kp.dentry);
-		if (inode) {
-			inode_lock(inode);
-			if (inode->i_flags & S_IMMUTABLE)
-				inode_set_flags(inode, 0, S_IMMUTABLE);
-			inode_unlock(inode);
-			vfs_truncate(&kp, out_len);
-		}
-		path_put(&kp);
+	inode = file_inode(file);
+	if (inode) {
+		int trunc_ret;
+		inode_lock(inode);
+		if (inode->i_flags & S_IMMUTABLE)
+			inode_set_flags(inode, 0, S_IMMUTABLE);
+		inode_unlock(inode);
+		trunc_ret = vfs_truncate(&file->f_path, out_len);
+		if (trunc_ret)
+			printk(KERN_DEBUG "kblocker: clear_hosts truncate failed (ret=%d)\n", trunc_ret);
 	}
 
 	kfree(out);
@@ -588,8 +589,6 @@ static void clear_hosts_from_kernel(void)
 static int update_hosts_file(void)
 {
 	struct file *file;
-	struct path kp;
-	struct inode *inode;
 	char *buf = NULL, *out, *p;
 	loff_t len, base_len = 0;
 	ssize_t pos;
@@ -676,19 +675,21 @@ static int update_hosts_file(void)
 	hosts_clear_immutable();
 	kernel_write(file, out, pos, &zero);
 
-	if (!kern_path("/etc/hosts", 0, &kp)) {
-		inode = d_inode(kp.dentry);
-		if (inode) {
-			inode_lock(inode);
-			if (inode->i_flags & S_IMMUTABLE)
-				inode_set_flags(inode, 0, S_IMMUTABLE);
-			inode_unlock(inode);
-			vfs_truncate(&kp, pos);
-			inode_lock(inode);
-			inode_set_flags(inode, S_IMMUTABLE, S_IMMUTABLE);
-			inode_unlock(inode);
+	/* Truncate via the open file's own path (not kern_path, which may
+	 * resolve to a different inode on overlay filesystems)
+	 */
+	{
+		struct inode *in = file_inode(file);
+		if (in) {
+			inode_lock(in);
+			if (in->i_flags & S_IMMUTABLE)
+				inode_set_flags(in, 0, S_IMMUTABLE);
+			inode_unlock(in);
+			vfs_truncate(&file->f_path, pos);
+			inode_lock(in);
+			inode_set_flags(in, S_IMMUTABLE, S_IMMUTABLE);
+			inode_unlock(in);
 		}
-		path_put(&kp);
 	}
 
 	kfree(out);
@@ -792,7 +793,10 @@ static int kblocker_permission(struct inode *inode, int mask)
 {
 	int i;
 
-	if ((mask & MAY_WRITE) && !READ_ONCE(kblocker_bypass_protection)) {
+	if (READ_ONCE(kblocker_bypass_protection))
+		return 0;
+
+	if ((mask & MAY_WRITE)) {
 		for (i = 0; i < num_protected_files; i++) {
 			if (protected_files[i].exists &&
 			    protected_files[i].inode == inode)
@@ -898,6 +902,13 @@ static void protect_file(const char *path)
 		}
 	}
 	if (!(inode->i_flags & S_IMMUTABLE)) {
+		/* Re-check bypass inside the lock: update_hosts_file may have set it
+		 * while we were waiting for the lock on another CPU.
+		 */
+		if (READ_ONCE(kblocker_bypass_protection)) {
+			inode_unlock(inode);
+			goto put;
+		}
 		inode_set_flags(inode, S_IMMUTABLE, S_IMMUTABLE);
 		printk(KERN_WARNING "kblocker: re-applied immutable flag on %s\n",
 		       path);
@@ -1573,7 +1584,7 @@ static void generate_unload_key(void)
 }
 
 static ssize_t update_hosts_store(struct kobject *kobj, struct kobj_attribute *attr,
-				  const char *buf, size_t count)
+		const char *buf, size_t count)
 {
 	int ret = update_hosts_file();
 	if (ret)
