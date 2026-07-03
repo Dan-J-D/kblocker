@@ -666,10 +666,20 @@ func fuzzPhase4(n int) (pass, fail int, errors []string) {
 		ops  []func() error
 	}{
 		{
-			name: "enable → enable (double)",
+			name: "enable → enable (double, EPERM expected on second)",
 			ops: []func() error{
 				func() error { return writeSysfs("enabled", "60") },
-				func() error { return writeSysfs("enabled", "120") },
+				func() error {
+					err := writeSysfs("enabled", "120")
+					if err != nil && strings.Contains(err.Error(), "operation not permitted") {
+						return nil
+					}
+					return fmt.Errorf("expected EPERM on double enable, got %v", err)
+				},
+				func() error {
+					writeSysfs("enabled", "0")
+					return nil
+				},
 			},
 		},
 		{

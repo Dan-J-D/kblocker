@@ -556,8 +556,22 @@ func doEnable(args []string) {
 	insecure := false
 	minutes := 60
 
-	// Clean up stale PGP ciphertexts from a prior expired session
-	cleanupPGPCiphertexts()
+	// Check if already enabled while PGP is active
+	enabledRaw, _ := readSysfs(sysfsBase + "/enabled")
+	if enabledRaw != "" {
+		enabledFields := strings.Fields(enabledRaw)
+		if len(enabledFields) > 0 && enabledFields[0] == "1" {
+			pgpRaw, _ := readSysfs(sysfsBase + "/pgp_active")
+			if strings.TrimSpace(pgpRaw) == "1" {
+				fmt.Fprintf(os.Stderr, "%sError: blocking is already active with PGP mode.%s\n", colorRed, colorNC)
+				fmt.Fprintln(os.Stderr, "  Disable first: kblockerctl unblock")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "%sError: blocking is already active.%s\n", colorRed, colorNC)
+			fmt.Fprintln(os.Stderr, "  Disable first: kblockerctl disable")
+			os.Exit(1)
+		}
+	}
 
 	for _, a := range args {
 		if a == "--insecure" {
@@ -620,8 +634,6 @@ func doEnable(args []string) {
 					}
 					keyPath := filepath.Join(pgpKeyDir, name)
 				outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
-				chattr(outPath, "-i")
-				os.Remove(outPath)
 				if err := gpgEncrypt(hexKey, keyPath, outPath); err != nil {
 						fmt.Fprintf(os.Stderr, "  Failed to encrypt for %s: %v\n", fp, err)
 						continue
@@ -639,6 +651,10 @@ func doEnable(args []string) {
 				fmt.Fprintln(os.Stderr, "  File format must be ASCII-armored public key (.asc).")
 				os.Exit(1)
 			}
+
+			// Only now, after confirming all new ciphertexts are written,
+			// delete the old ones from any prior session
+			cleanupPGPCiphertextsExcept(successCount > 0)
 
 			fmt.Printf("%sKey encrypted for %d recipient(s) (raw key never written to disk).%s\n", colorGreen, successCount, colorNC)
 			writeSysfs(sysfsBase+"/pgp_active", "1")
@@ -669,6 +685,29 @@ func cleanupPGPCiphertexts() {
 		p := filepath.Join(pgpEncDir, e.Name())
 		chattr(p, "-i")
 		os.Remove(p)
+	}
+}
+
+func cleanupPGPCiphertextsExcept(keepNew bool) {
+	if keepNew {
+		// Remove only ciphertexts for keys that are no longer registered.
+		// New ones were already written by gpgEncrypt above.
+		entries, err := os.ReadDir(pgpEncDir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "unlock-") && strings.HasSuffix(e.Name(), ".asc") {
+				fp := strings.TrimPrefix(strings.TrimSuffix(e.Name(), ".asc"), "unlock-")
+				if _, err := os.Stat(filepath.Join(pgpKeyDir, fp+".asc")); os.IsNotExist(err) {
+					p := filepath.Join(pgpEncDir, e.Name())
+					chattr(p, "-i")
+					os.Remove(p)
+				}
+			}
+		}
+	} else {
+		cleanupPGPCiphertexts()
 	}
 }
 

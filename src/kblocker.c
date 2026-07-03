@@ -1103,7 +1103,7 @@ static ssize_t enabled_store(struct kobject *kobj, struct kobj_attribute *attr,
 			return count;
 		}
 		disable_blocking();
-	} else if (READ_ONCE(pgp_active) && READ_ONCE(enabled)) {
+	} else if (READ_ONCE(enabled)) {
 		return -EPERM;
 	} else {
 		enable_blocking((unsigned int)val);
