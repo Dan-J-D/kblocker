@@ -587,6 +587,27 @@ func doEnable(args []string) {
 		writeSysfsLines(sysfsBase+"/blocked_domains", domains)
 	}
 
+	var numPGP int
+	if !insecure {
+		numPGP = pgpCount(pgpKeyDir)
+		if numPGP == 0 {
+			fmt.Fprintf(os.Stderr, "%sNo PGP keys registered.%s\n", colorRed, colorNC)
+			fmt.Fprintln(os.Stderr, "  Register a PGP public key first:")
+			fmt.Fprintln(os.Stderr, "    kblockerctl add-pgp <pubkey.asc>")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "  Or use --insecure to print the key to stdout")
+			fmt.Fprintf(os.Stderr, "  (you must save it yourself):\n")
+			fmt.Fprintf(os.Stderr, "    kblockerctl enable %d --insecure\n", minutes)
+			os.Exit(1)
+		}
+
+		fmt.Printf("%sPre-arming PGP mode...%s\n", colorCyan, colorNC)
+		if err := writeSysfs(sysfsBase+"/pgp_active", "1"); err != nil {
+			fmt.Fprintf(os.Stderr, "%sFailed to arm PGP mode.%s\n", colorRed, colorNC)
+			os.Exit(1)
+		}
+	}
+
 	if err := writeSysfs(sysfsBase+"/enabled", fmt.Sprintf("%d", minutes*60)); err != nil {
 		fmt.Fprintf(os.Stderr, "%sFailed to enable blocking%s\n", colorRed, colorNC)
 		fmt.Fprintln(os.Stderr, "  If PGP mode is active, disable first: kblockerctl unblock")
@@ -602,18 +623,6 @@ func doEnable(args []string) {
 		fmt.Printf("%sWarning: could not read unload key.%s\n", colorYellow, colorNC)
 	} else {
 		if !insecure {
-			numPGP := pgpCount(pgpKeyDir)
-			if numPGP == 0 {
-				fmt.Fprintf(os.Stderr, "%sNo PGP keys registered.%s\n", colorRed, colorNC)
-				fmt.Fprintln(os.Stderr, "  Register a PGP public key first:")
-				fmt.Fprintln(os.Stderr, "    kblockerctl add-pgp <pubkey.asc>")
-				fmt.Fprintln(os.Stderr, "")
-				fmt.Fprintln(os.Stderr, "  Or use --insecure to print the key to stdout")
-				fmt.Fprintf(os.Stderr, "  (you must save it yourself):\n")
-				fmt.Fprintf(os.Stderr, "    kblockerctl enable %d --insecure\n", minutes)
-				os.Exit(1)
-			}
-
 			fmt.Printf("%sEncrypting key for %d PGP recipients...%s\n", colorCyan, numPGP, colorNC)
 			os.MkdirAll(pgpEncDir, 0755)
 
@@ -634,11 +643,13 @@ func doEnable(args []string) {
 					}
 					keyPath := filepath.Join(pgpKeyDir, name)
 				outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
+				chattr(outPath, "-i")
+				os.Remove(outPath)
 				if err := gpgEncrypt(hexKey, keyPath, outPath); err != nil {
 						fmt.Fprintf(os.Stderr, "  Failed to encrypt for %s: %v\n", fp, err)
 						continue
 					}
-					os.Chmod(outPath, 0600)
+					os.Chmod(outPath, 0644)
 					chattr(outPath, "+i")
 					fmt.Printf("  Encrypted for %s\n", fp)
 					successCount++
@@ -657,7 +668,6 @@ func doEnable(args []string) {
 			cleanupPGPCiphertextsExcept(successCount > 0)
 
 			fmt.Printf("%sKey encrypted for %d recipient(s) (raw key never written to disk).%s\n", colorGreen, successCount, colorNC)
-			writeSysfs(sysfsBase+"/pgp_active", "1")
 		} else {
 			fmt.Printf("%sINSECURE MODE: key will not be saved to disk.%s\n", colorYellow, colorNC)
 			fmt.Printf("  Unload key: %s\n", hexKey)
@@ -719,7 +729,19 @@ func doDisable() {
 		return
 	}
 
-	writeSysfs(sysfsBase+"/enabled", "0")
+	/* Use the disable sysfs, which handles both PGP and non-PGP modes.
+	 * When PGP is not active, it disables immediately.
+	 * When PGP is active, it requires the key — so tell the user. */
+	pgpOn, _ := readSysfs(sysfsBase + "/pgp_active")
+	if pgpOn == "1" {
+		fmt.Fprintf(os.Stderr, "%sPGP mode active — use 'kblockerctl unblock' instead.%s\n", colorRed, colorNC)
+		os.Exit(1)
+	}
+
+	if err := writeSysfs(sysfsBase+"/disable", "0"); err != nil {
+		fmt.Fprintf(os.Stderr, "%sFailed to disable: %v%s\n", colorRed, err, colorNC)
+		os.Exit(1)
+	}
 	chattr(stateFile, "-i")
 	os.Remove(stateFile)
 	cleanupPGPCiphertexts()
@@ -800,7 +822,10 @@ func doUnblock(args []string) {
 			os.Exit(1)
 		}
 	} else {
-		writeSysfs(sysfsBase+"/enabled", "0")
+		if err := writeSysfs(sysfsBase+"/disable", "0"); err != nil {
+			fmt.Fprintf(os.Stderr, "%sFailed to disable: %v%s\n", colorRed, err, colorNC)
+			os.Exit(1)
+		}
 	}
 
 	chattr(stateFile, "-i")
@@ -1013,30 +1038,32 @@ func doReload() {
 		if hexKey == "" {
 			hexKey = readKeyFromDmesg()
 		}
-		if hexKey != "" {
-			fmt.Printf("%sRefreshing PGP ciphertexts for %d keys...%s\n", colorCyan, numPGP, colorNC)
-			os.MkdirAll(pgpEncDir, 0755)
-			entries, _ := os.ReadDir(pgpKeyDir)
-			for _, e := range entries {
-				name := e.Name()
-				if !strings.HasSuffix(name, ".asc") && !strings.HasSuffix(name, ".gpg") && !strings.HasSuffix(name, ".pub") {
-					continue
-				}
-				fp := fpFromFilename(name)
-				if fp == "" || !hexFPRegex.MatchString(fp) {
-					continue
-				}
-				keyPath := filepath.Join(pgpKeyDir, name)
-				outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
-				chattr(outPath, "-i")
-				os.Remove(outPath)
-				gpgEncrypt(hexKey, keyPath, outPath)
-				os.Chmod(outPath, 0600)
-				chattr(outPath, "+i")
+		if hexKey == "" {
+			fmt.Printf("%sWarning: no unload key available to re-encrypt.%s\n", colorYellow, colorNC)
+			goto skipEnc
+		}
+		fmt.Printf("%sRefreshing PGP ciphertexts for %d keys...%s\n", colorCyan, numPGP, colorNC)
+		os.MkdirAll(pgpEncDir, 0755)
+		entries, _ := os.ReadDir(pgpKeyDir)
+		for _, e := range entries {
+			name := e.Name()
+			if !strings.HasSuffix(name, ".asc") && !strings.HasSuffix(name, ".gpg") && !strings.HasSuffix(name, ".pub") {
+				continue
 			}
-			writeSysfs(sysfsBase+"/pgp_active", "1")
+			fp := fpFromFilename(name)
+			if fp == "" || !hexFPRegex.MatchString(fp) {
+				continue
+			}
+			keyPath := filepath.Join(pgpKeyDir, name)
+			outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
+			chattr(outPath, "-i")
+			os.Remove(outPath)
+			gpgEncrypt(hexKey, keyPath, outPath)
+			os.Chmod(outPath, 0644)
+			chattr(outPath, "+i")
 		}
 	}
+skipEnc:
 
 	if restoreStateFromFile() {
 		fmt.Printf("%sBlocking state restored from disk.%s\n", colorGreen, colorNC)
@@ -1278,7 +1305,7 @@ func doAddPGP(args []string) {
 			chattr(outPath, "-i")
 			os.Remove(outPath)
 			if err := gpgEncrypt(hexKey, dest, outPath); err == nil {
-				os.Chmod(outPath, 0600)
+				os.Chmod(outPath, 0644)
 				chattr(outPath, "+i")
 			}
 		}
@@ -2021,7 +2048,7 @@ func addKey(w http.ResponseWriter, r *http.Request) {
 				io.WriteString(stdin, hexKey)
 				stdin.Close()
 				encCmd.Wait()
-				os.Chmod(outPath, 0600)
+				os.Chmod(outPath, 0644)
 			}
 		}
 	}
@@ -2151,7 +2178,7 @@ func handleAPIRefreshEnc(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(stdin, hexKey)
 			stdin.Close()
 			cmd.Wait()
-			os.Chmod(outPath, 0600)
+			os.Chmod(outPath, 0644)
 			count++
 		}
 	}
@@ -2397,6 +2424,7 @@ func handleAPICiphertextByKey(w http.ResponseWriter, r *http.Request) {
 			w.Write(data)
 			return
 		}
+		// File not found — fall through to GPG extraction
 	}
 
 	// Fall back to GPG-based fingerprint extraction
@@ -2433,7 +2461,25 @@ func handleAPICiphertextByKey(w http.ResponseWriter, r *http.Request) {
 	encFile := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
 	data, err := os.ReadFile(encFile)
 	if err != nil {
-		http.Error(w, "No ciphertext found for this key", http.StatusNotFound)
+		// List available fingerprints so the user can compare
+		avail := ""
+		entries, _ := os.ReadDir(pgpEncDir)
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "unlock-") && strings.HasSuffix(e.Name(), ".asc") {
+				f := strings.TrimPrefix(strings.TrimSuffix(e.Name(), ".asc"), "unlock-")
+				if avail != "" {
+					avail += ", "
+				}
+				avail += f
+			}
+		}
+		msg := fmt.Sprintf("No ciphertext found for this key (looked for %s", fp)
+		if avail != "" {
+			msg += fmt.Sprintf("; available: %s", avail)
+		}
+		msg += ")"
+		log.Printf("unblock-web: %s (read err: %v)", msg, err)
+		http.Error(w, msg, http.StatusNotFound)
 		return
 	}
 

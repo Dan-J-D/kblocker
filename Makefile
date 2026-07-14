@@ -1,5 +1,5 @@
 obj-m += kblocker.o
-kblocker-objs := src/kblocker.o
+kblocker-objs := src/main.o src/netfilter.o src/file_protection.o src/state.o src/key.o
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
@@ -16,7 +16,7 @@ kfuzz: cmd/fuzz/main.go
 
 clean:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
-	rm -f src/*.o src/*.ko src/*.mod.c Module.symvers modules.order kblockerctl kfuzz
+	rm -f src/*.o src/*.ko src/*.mod.c src/.*.cmd Module.symvers modules.order kblockerctl kfuzz
 
 install: all
 	@if [ "$(shell id -u)" -ne 0 ]; then \
