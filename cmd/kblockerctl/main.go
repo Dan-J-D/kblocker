@@ -1350,7 +1350,17 @@ func doRemovePGP(args []string) {
 		if fp == "" || !hexFPRegex.MatchString(fp) {
 			continue
 		}
-		if strings.EqualFold(name, target+".asc") || strings.EqualFold(name, target+".gpg") || strings.EqualFold(name, target+".pub") || strings.EqualFold(fp, target) {
+		matched := strings.EqualFold(name, target+".asc") || strings.EqualFold(name, target+".gpg") || strings.EqualFold(name, target+".pub") || strings.EqualFold(fp, target)
+		if !matched {
+			// Fallback: try GPG-based fingerprint extraction (the filename
+			// may differ from what GPG reports for the same key, e.g. when
+			// the key was uploaded via the web UI with openpgp.js)
+			keyPath := filepath.Join(pgpKeyDir, name)
+			if gpgFP, _, err := gpgShowKeys(keyPath); err == nil {
+				matched = strings.EqualFold(gpgFP, target)
+			}
+		}
+		if matched {
 			encFile := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
 			chattr(encFile, "-i")
 			os.Remove(encFile)
@@ -2008,10 +2018,11 @@ func addKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Always use GPG-extracted fingerprint for the filename — the
+	// client-provided fingerprint (from openpgp.js) may differ from
+	// what GPG reports for the same key, causing filename mismatch
+	// with list-pgp and remove-pgp.
 	fp := gpgFP
-	if req.Fingerprint != "" && hexFPRegex.MatchString(strings.ToUpper(req.Fingerprint)) {
-		fp = strings.ToUpper(req.Fingerprint)
-	}
 
 	os.MkdirAll(pgpKeyDir, 0755)
 	dest := filepath.Join(pgpKeyDir, fp+".asc")
