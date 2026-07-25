@@ -43,7 +43,8 @@ deb: kblockerctl
 	fakeroot dpkg-deb --root-owner-group --build "$$PKG_DIR" "build/$$DEB"; \
 	rm -rf "$$PKG_DIR"; \
 	echo ""; \
-	echo "Done: build/$$DEB ($$(du -h build/$$DEB | cut -f1))"
+	SIZE=$$(ls -lh "build/$$DEB" | awk '{print $$5}'); \
+	echo "Done: build/$$DEB ($$SIZE)"
 
 clean:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
