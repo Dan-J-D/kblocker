@@ -11,6 +11,13 @@ case "$1" in
             rmmod kblocker 2>/dev/null || rmmod -f kblocker 2>/dev/null || true
         fi
 
+        # Clean state so reinstall doesn't auto-restore
+        if [ -f /var/lib/kblocker/state ]; then
+            chattr -i /var/lib/kblocker/state 2>/dev/null || true
+            rm -f /var/lib/kblocker/state
+        fi
+        rm -rf /var/lib/kblocker/unlock-pgp 2>/dev/null || true
+
         for f in \
             /etc/modules-load.d/kblocker.conf \
             /lib/modules/$(uname -r)/extra/kblocker.ko; do

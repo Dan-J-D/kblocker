@@ -4,6 +4,7 @@ set -e
 case "$1" in
     remove|upgrade)
         rm -f /etc/modules-load.d/kblocker.conf
+        rm -rf /var/lib/kblocker
         systemctl daemon-reload 2>/dev/null || true
         ;;
     purge)
