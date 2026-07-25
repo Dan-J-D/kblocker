@@ -16,7 +16,10 @@ case "$1" in
             chattr -i /var/lib/kblocker/state 2>/dev/null || true
             rm -f /var/lib/kblocker/state
         fi
-        rm -rf /var/lib/kblocker/unlock-pgp 2>/dev/null || true
+        if [ -d /var/lib/kblocker/unlock-pgp ]; then
+            find /var/lib/kblocker/unlock-pgp -type f -exec chattr -i {} \; 2>/dev/null || true
+            rm -rf /var/lib/kblocker/unlock-pgp
+        fi
 
         for f in \
             /etc/modules-load.d/kblocker.conf \

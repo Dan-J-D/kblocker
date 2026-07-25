@@ -4,13 +4,23 @@ set -e
 case "$1" in
     remove|upgrade)
         rm -f /etc/modules-load.d/kblocker.conf
+        # Clean immutable files before removal
+        if [ -d /var/lib/kblocker ]; then
+            find /var/lib/kblocker -type f -exec chattr -i {} \; 2>/dev/null || true
+        fi
         rm -rf /var/lib/kblocker
         systemctl daemon-reload 2>/dev/null || true
         ;;
     purge)
         rm -rf /usr/src/kblocker-2.0
         rm -f /etc/modules-load.d/kblocker.conf
+        if [ -d /etc/kblocker ]; then
+            find /etc/kblocker -type f -exec chattr -i {} \; 2>/dev/null || true
+        fi
         rm -rf /etc/kblocker
+        if [ -d /var/lib/kblocker ]; then
+            find /var/lib/kblocker -type f -exec chattr -i {} \; 2>/dev/null || true
+        fi
         rm -rf /var/lib/kblocker
         systemctl daemon-reload 2>/dev/null || true
         ;;
