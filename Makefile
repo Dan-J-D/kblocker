@@ -15,12 +15,14 @@ kfuzz: cmd/fuzz/main.go
 	go build -o kfuzz cmd/fuzz/main.go
 
 deb: kblockerctl
-	@ARCH=$$(dpkg --print-architecture); \
+	@set -e; \
+	ARCH=$$(dpkg --print-architecture); \
 	VERSION="2.0-1"; \
 	DEB="kblocker_$${VERSION}_$${ARCH}.deb"; \
 	PKG_DIR="$(PWD)/debian/kblocker"; \
 	DEB_DIR="$$PKG_DIR/DEBIAN"; \
 	rm -rf "$$PKG_DIR"; \
+	rm -f "build/$$DEB"; \
 	install -d "$$PKG_DIR/usr/local/bin"; \
 	install -m 755 kblockerctl "$$PKG_DIR/usr/local/bin/kblockerctl"; \
 	install -d "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}"; \
