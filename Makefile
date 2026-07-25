@@ -5,7 +5,7 @@ KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 DESTDIR ?=
 
-all: kblockerctl kfuzz
+all: kblockerctl
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
 
 kblockerctl: cmd/kblockerctl/main.go
@@ -13,6 +13,35 @@ kblockerctl: cmd/kblockerctl/main.go
 
 kfuzz: cmd/fuzz/main.go
 	go build -o kfuzz cmd/fuzz/main.go
+
+deb: kblockerctl
+	@ARCH=$$(dpkg --print-architecture); \
+	VERSION="2.0-1"; \
+	DEB="kblocker_$${VERSION}_$${ARCH}.deb"; \
+	PKG_DIR="$(PWD)/debian/kblocker"; \
+	DEB_DIR="$$PKG_DIR/DEBIAN"; \
+	rm -rf "$$PKG_DIR"; \
+	install -d "$$PKG_DIR/usr/local/bin"; \
+	install -m 755 kblockerctl "$$PKG_DIR/usr/local/bin/kblockerctl"; \
+	install -d "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}"; \
+	cp -a src dkms.conf Makefile "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}/"; \
+	find "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}/src" -name '*.o' -o -name '*.o.cmd' -o -name '*.mod.c' -o -name '*.ko' -o -name '*.mod' | xargs rm -f 2>/dev/null || true; \
+	find "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}" -name '.gitignore' -delete 2>/dev/null || true; \
+	install -d "$$PKG_DIR/etc/kblocker/keys"; \
+	install -d "$$PKG_DIR/var/lib/kblocker"; \
+	install -d "$$DEB_DIR"; \
+	sed 's/ARCH/'"$$ARCH"'/g; s/^Version:.*/Version: '$$VERSION'/' debian/control > "$$DEB_DIR/control"; \
+	install -m 644 debian/changelog "$$DEB_DIR/changelog"; \
+	gzip -9nf "$$DEB_DIR/changelog"; \
+	install -m 644 debian/copyright "$$DEB_DIR/copyright"; \
+	install -m 755 debian/postinst "$$DEB_DIR/postinst"; \
+	install -m 755 debian/prerm "$$DEB_DIR/prerm"; \
+	install -m 755 debian/postrm "$$DEB_DIR/postrm"; \
+	mkdir -p build; \
+	fakeroot dpkg-deb --root-owner-group --build "$$PKG_DIR" "build/$$DEB"; \
+	rm -rf "$$PKG_DIR"; \
+	echo ""; \
+	echo "Done: build/$$DEB ($$(du -h build/$$DEB | cut -f1))"
 
 clean:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean

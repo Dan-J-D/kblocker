@@ -3,6 +3,16 @@ set -e
 
 case "$1" in
     configure)
+        if command -v dkms >/dev/null 2>&1; then
+            dkms add kblocker/2.0 2>/dev/null || true
+            dkms build kblocker/2.0 2>/dev/null || \
+                echo "Warning: dkms build failed. Run 'dkms build kblocker/2.0' manually." >&2
+            dkms install kblocker/2.0 2>/dev/null || \
+                echo "Warning: dkms install failed. Run 'dkms install kblocker/2.0' manually." >&2
+        else
+            echo "Warning: dkms not found. Module will not auto-build on kernel upgrades." >&2
+        fi
+
         depmod -a
 
         echo "kblocker" > /etc/modules-load.d/kblocker.conf

@@ -2,7 +2,7 @@ Package: kblocker
 Version: 1.0-1
 Architecture: ARCH
 Maintainer: kblocker maintainer <root@localhost>
-Depends: gnupg, e2fsprogs, xxd
+Depends: dkms, gnupg, e2fsprogs, xxd
 Recommends: perl
 Section: kernel
 Priority: optional
