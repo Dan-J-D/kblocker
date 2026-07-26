@@ -19,6 +19,23 @@ static void do_disable_cleanup(void)
 		timer_delete(&enable_timer);
 		WRITE_ONCE(enable_timer_active, false);
 	}
+
+	{
+		struct file *sf;
+		sf = filp_open(STATE_FILE, O_RDWR, 0);
+		if (!IS_ERR(sf)) {
+			struct inode *inode = file_inode(sf);
+			if (inode) {
+				inode_lock(inode);
+				if (inode->i_flags & S_IMMUTABLE)
+					inode_set_flags(inode, 0, S_IMMUTABLE);
+				inode_unlock(inode);
+			}
+			vfs_truncate(&sf->f_path, 0);
+			filp_close(sf, NULL);
+		}
+	}
+
 	printk(KERN_INFO "kblocker: disabled\n");
 }
 

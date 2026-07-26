@@ -449,6 +449,21 @@ static void __exit kblocker_exit(void)
 	cleanup_file_protection();
 	kblocker_cleanup_netfilter();
 
+	{
+		struct file *sf = filp_open(STATE_FILE, O_RDWR, 0);
+		if (!IS_ERR(sf)) {
+			struct inode *inode = file_inode(sf);
+			if (inode) {
+				inode_lock(inode);
+				if (inode->i_flags & S_IMMUTABLE)
+					inode_set_flags(inode, 0, S_IMMUTABLE);
+				inode_unlock(inode);
+			}
+			vfs_truncate(&sf->f_path, 0);
+			filp_close(sf, NULL);
+		}
+	}
+
 	if (kblocker_kobj) {
 		sysfs_remove_group(kblocker_kobj, &attr_group);
 		kobject_put(kblocker_kobj);

@@ -83,6 +83,20 @@ ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 			printk(KERN_INFO "kblocker: unload authorized, auto-disabled\n");
 			crypto_free_shash(tfm);
 			clear_hosts_from_kernel();
+			{
+				struct file *sf = filp_open(STATE_FILE, O_RDWR, 0);
+				if (!IS_ERR(sf)) {
+					struct inode *inode = file_inode(sf);
+					if (inode) {
+						inode_lock(inode);
+						if (inode->i_flags & S_IMMUTABLE)
+							inode_set_flags(inode, 0, S_IMMUTABLE);
+						inode_unlock(inode);
+					}
+					vfs_truncate(&sf->f_path, 0);
+					filp_close(sf, NULL);
+				}
+			}
 			return count;
 		}
 	}
