@@ -961,7 +961,13 @@ func fuzzPhase6(n int) (pass, fail int, errors []string) {
 				case "pgp_active":
 					data = strconv.Itoa(randInt(2))
 				case "restore":
-					data = randHex(64) + ":" + strconv.Itoa(int(time.Now().Unix())+3600)
+					/* Restoring a future expiry arms the module as
+					 * PGP-protected and enabled; it then can only be
+					 * turned off with the (unknown) key. Use an always-
+					 * expired timestamp so do_restore() rejects the write
+					 * and the chaos test still exercises the parse path
+					 * without wedging the module. */
+					data = randHex(64) + ":" + strconv.Itoa(int(time.Now().Unix())-3600)
 				case "update_hosts":
 					data = "1"
 				}
@@ -1130,18 +1136,31 @@ func fuzzPhase8() (pass, fail int, errors []string) {
 	} else {
 		pass++
 
-		// Write a manual state file (simulating kblockerctl storeState)
 		hash := sha256Hex(key)
-		expiry := time.Now().Unix() + 120
+		if hash == "" {
+			errors = append(errors, "could not hash key for state test")
+			fail++
+		} else {
+			pass++
+		}
 
+		// Disable cleanly first: disabling truncates the state file, so it
+		// must be written afterwards. This mirrors a reboot, where the
+		// module is gone without going through disable and the kernel
+		// restores from whatever state file exists at next boot.
+		writeSysfs("enabled", "0")
+
+		// Now persist the state file the way kblockerctl storeState() does.
+		// Note: the real state file has NO pgp_active line — protection
+		// after restore is a kernel invariant, not a file flag.
+		expiry := time.Now().Unix() + 120
 		os.MkdirAll("/var/lib/kblocker", 0755)
 		chattr(stateFile, "-i")
-		stateContent := fmt.Sprintf("key_hash:%s\nexpiry:%d\ndomains:persist-test.com\nblocked_ips:10.0.0.55\npgp_active:0\n", hash, expiry)
+		stateContent := fmt.Sprintf("key_hash:%s\nexpiry:%d\ndomains:persist-test.com\nblocked_ips:10.0.0.55\n", hash, expiry)
 		os.WriteFile(stateFile, []byte(stateContent), 0600)
 		chattr(stateFile, "+i")
 
-		// Reload module
-		writeSysfs("enabled", "0")
+		// Reload module (simulates reboot: module loads with a state file)
 		writeSysfs("pgp_active", "0")
 		if err := unloadModule(); err != nil {
 			errors = append(errors, fmt.Sprintf("unload for state test: %v", err))
@@ -1185,6 +1204,45 @@ func fuzzPhase8() (pass, fail int, errors []string) {
 			ips := readSysfs("blocked_ips")
 			if !strings.Contains(ips, "10.0.0.55") {
 				errors = append(errors, fmt.Sprintf("IPs not restored: %q", ips))
+				fail++
+			} else {
+				pass++
+			}
+
+			// Regression: a restored session must be PGP-protected even
+			// though the state file has no pgp_active line.
+			pgpRaw := readSysfs("pgp_active")
+			if strings.TrimSpace(pgpRaw) == "1" {
+				pass++
+			} else {
+				errors = append(errors, fmt.Sprintf("expected pgp_active=1 after restore (reboot bypass!), got %q", pgpRaw))
+				fail++
+			}
+
+			// Disabling without the key must be rejected after restore.
+			if err := writeSysfs("enabled", "0"); err == nil {
+				errors = append(errors, "enabled=0 accepted after restore without key (reboot bypass!)")
+				fail++
+			} else {
+				pass++
+			}
+			if err := writeSysfs("pgp_active", "0"); err == nil {
+				errors = append(errors, "pgp_active=0 accepted after restore (reboot bypass!)")
+				fail++
+			} else {
+				pass++
+			}
+
+			// Only the recorded key can disable a restored session.
+			if err := writeSysfs("disable", key); err != nil {
+				errors = append(errors, fmt.Sprintf("disable with correct key after restore: %v", err))
+				fail++
+			} else {
+				pass++
+			}
+			enabled = readSysfs("enabled")
+			if !strings.HasPrefix(enabled, "0") {
+				errors = append(errors, fmt.Sprintf("expected disabled after keyed disable, got %q", enabled))
 				fail++
 			} else {
 				pass++

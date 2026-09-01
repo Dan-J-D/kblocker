@@ -141,6 +141,25 @@ void do_restore(const u8 *hash, u64 expiry_ts)
 	memcpy(key_hash, hash, 32);
 	WRITE_ONCE(state_restored, true);
 	WRITE_ONCE(allow_unload, false);
+	/* Security invariant: a session restored from disk was always
+	 * created with PGP protection (insecure enables never persist
+	 * state), and the raw unload key has been erased from kernel
+	 * memory. Re-arm PGP protection here so that neither the
+	 * "enabled" nor the "disable" sysfs attribute can turn the
+	 * blocker off without the key, even after a reboot.
+	 *
+	 * Deliberately NOT driven by a userspace-written "pgp_active:"
+	 * line in the state file: that would let anyone who can write
+	 * the state file set "pgp_active:0" and defeat the block.
+	 * Restored state always implies PGP protection.
+	 *
+	 * Setting pgp_active before enabled ensures the read-only guard
+	 * (pgp_active_store rejects writes while enabled) is already in
+	 * force when the blocker comes up. */
+	WRITE_ONCE(pgp_active, true);
+	memzero_explicit(unload_key, sizeof(unload_key));
+	memzero_explicit(pgp_key, sizeof(pgp_key));
+	pgp_key_consumed = true;
 
 	u64 delta = expiry_ts - ktime_get_real_seconds();
 	expiry_seconds = expiry_ts;
@@ -251,16 +270,6 @@ void try_restore_state_from_disk(void)
 					do_restore(hash, expiry);
 				}
 			}
-		}
-	}
-
-	p = strstr(buf, "pgp_active:");
-	if (p && READ_ONCE(state_restored)) {
-		p += 11;
-		if (*p == '1') {
-			WRITE_ONCE(pgp_active, true);
-			memzero_explicit(unload_key, sizeof(unload_key));
-			printk(KERN_DEBUG "kblocker: PGP mode restored from disk\n");
 		}
 	}
 

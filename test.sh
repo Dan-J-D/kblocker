@@ -814,6 +814,13 @@ fi
 STATUS=$(cat "$SYSFS/status")
 check grep -q '^enabled: 1$' <<<"$STATUS"
 check grep -q '^state_restored: 1$' <<<"$STATUS"
+# A restored session must be PGP-protected (regression: reboot used to
+# lose pgp_active, letting "kblockerctl disable" bypass the key)
+if grep -q '^1$' < "$SYSFS/pgp_active"; then
+    ok "restore re-arms PGP protection"
+else
+    fail "restore re-arms PGP protection (got: $(cat "$SYSFS/pgp_active"))"
+fi
 # key should now say "restored"
 if grep -q '^restored$' < "$SYSFS/key"; then
     ok "key sysfs shows 'restored' after state restore"
@@ -827,10 +834,23 @@ if [[ "$REM" -gt 250 && "$REM" -le 300 ]]; then
 else
     fail "remaining ~300s after restore (got ${REM}s)"
 fi
-# disable + unload cleanly
-echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
-echo "0" > "$SYSFS/enabled" 2>/dev/null || true
-sleep 1
+# Disable + unload cleanly. A restored session is PGP-protected, so the
+# blocker must NOT be disarmed without the key (this is the bug being fixed).
+if echo 0 > "$SYSFS/pgp_active" 2>/dev/null; then
+    fail "restore: pgp_active writable while enabled (bypass!)"
+else
+    ok "restore: pgp_active read-only while enabled"
+fi
+if echo "0" > "$SYSFS/enabled" 2>/dev/null; then
+    fail "restore: enabled accepted disable without key (bypass!)"
+else
+    ok "restore: enabled rejects disable without key"
+fi
+if printf '%s' "$RESTORE_KEY" > "$SYSFS/disable" 2>/dev/null; then
+    ok "restore: authorized disable with key works"
+else
+    fail "restore: authorized disable with key"
+fi
 rmmod $MODULE 2>/dev/null || rmmod -f $MODULE 2>/dev/null || true
 
 # --- already-expired restore should be rejected ---
