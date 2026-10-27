@@ -14,3 +14,6 @@ KCSAN: data-race in __mmdrop\+
 # lockless thread_group_empty() fast path in exit_signals while a sibling
 # thread unhashes itself; the slow path rechecks under siglock
 KCSAN: data-race in (exit_signals|release_task) / (exit_signals|release_task)
+# futex wait reads timeout->task while the expiring hrtimer clears it; a
+# stale read only makes schedule() return at once, the task is already woken
+KCSAN: data-race in (futex_do_wait|hrtimer_wakeup) / (futex_do_wait|hrtimer_wakeup)
