@@ -11,9 +11,10 @@ KCSAN: data-race in (tick_nohz_handler|tick_nohz_idle_got_tick) / (tick_nohz_han
 KCSAN: data-race in pids_release\+
 # WARN_ON_ONCE(mm == current->active_mm) while lazy-TLB shootdown switches it
 KCSAN: data-race in __mmdrop\+
-# lockless thread_group_empty() fast path in exit_signals while a sibling
-# thread unhashes itself; the slow path rechecks under siglock
-KCSAN: data-race in (exit_signals|release_task) / (exit_signals|release_task)
+# lockless thread_group_empty() in exit_signals (fast path; the slow path
+# rechecks under siglock) and taskstats_exit (accounting only) while a
+# sibling thread unhashes itself
+KCSAN: data-race in (exit_signals|taskstats_exit|release_task) / (exit_signals|taskstats_exit|release_task)
 # hrtimer sleepers (futex wait, nanosleep, poll/select timeouts) read t->task
 # while the expiring hrtimer clears it; a stale read only makes schedule()
 # return at once, the task is already woken
@@ -30,3 +31,9 @@ KCSAN: data-race in e1000_clean_rx_irq\+
 # that read in this kernel build: other one-sided races in process_one_work
 # can mean a misused work_struct, including kblocker's
 KCSAN: data-race in process_one_work\+0x284/
+# a waking workqueue worker samples its own se.sum_exec_runtime while the
+# scheduler tick updates it (called only from the scheduler)
+KCSAN: data-race in wq_worker_running\+
+# nohz idle balancing scans the idle-CPU mask locklessly; a stale bit only
+# skips or wastes one balance pass. kblocker uses no bitmap search helpers
+KCSAN: data-race in _find_first_bit\+
