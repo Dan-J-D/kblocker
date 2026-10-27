@@ -25,3 +25,8 @@ KCSAN: data-race in (_find_next_zero_bit|sbitmap_find_bit) / (_find_next_zero_bi
 # e1000 reads an RX descriptor's status byte that the (emulated) NIC writes by
 # DMA; KCSAN cannot see device writes, so the origin is unknown
 KCSAN: data-race in e1000_clean_rx_irq\+
+# process_one_work samples the worker's se.sum_exec_runtime (CPU-intensive
+# detection) while the scheduler tick updates it. Pinned to the offset of
+# that read in this kernel build: other one-sided races in process_one_work
+# can mean a misused work_struct, including kblocker's
+KCSAN: data-race in process_one_work\+0x284/
