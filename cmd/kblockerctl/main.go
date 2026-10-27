@@ -107,6 +107,14 @@ func main() {
 		doWeb(args)
 	case "unblock-web":
 		doUnblockWeb(args)
+	case "schedule":
+		doSchedule(args)
+	case "web-pages":
+		doWebPages(args)
+	case "schedule-daemon":
+		doScheduleDaemon()
+	case "history":
+		doHistory(args)
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -132,9 +140,11 @@ Usage:
 
   kblockerctl unblock [--key <hex>]
       Disable blocking (same as disable). Module stays loaded.
+      --key - reads the key from stdin.
 
   kblockerctl unload [--key <hex>]
       Remove module (needs key via PGP decrypt or --key).
+      --key - reads the key from stdin.
 
   kblockerctl add <domain>
       Add a domain to the block list.
@@ -169,6 +179,28 @@ Usage:
 
   kblockerctl pgp-cipher <fingerprint>
       Print the PGP-encrypted unload key for a registered key.
+
+  kblockerctl schedule [--json]
+      Show scheduled blocks.
+
+  kblockerctl schedule set <schedule.json | ->
+      Replace the weekly schedule (not while blocking is active).
+
+  kblockerctl schedule clear
+      Remove all scheduled blocks.
+
+  kblockerctl web-pages [off | local | lan | custom --bind <ip>] [--port <port>]
+      Show or set where the scheduler service hosts the key holder
+      pages: off, this computer only, every device on your network, or
+      one address of your choice. The port is kept unless --port is given.
+      add-pgp-web and unblock-web use the same address by default.
+
+  kblockerctl schedule-daemon
+      Start blocks when a scheduled window opens and record block
+      history (run by kblocker-scheduler.service).
+
+  kblockerctl history [--json]
+      Show past blocks and time spent blocking.
 
   kblockerctl crash
       Trigger kernel panic (for emergency willpower).
@@ -286,11 +318,13 @@ func gpgShowKeys(path string) (fingerprint, user string, err error) {
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Split(line, ":")
+		// The first fpr/uid belong to the primary key; later fpr lines
+		// are subkeys, and key files are named after the primary
 		if len(fields) >= 10 {
-			if fields[0] == "fpr" {
+			if fields[0] == "fpr" && fingerprint == "" {
 				fingerprint = fields[9]
 			}
-			if fields[0] == "uid" {
+			if fields[0] == "uid" && user == "" {
 				user = fields[9]
 			}
 		}
@@ -688,15 +722,7 @@ func doUnblock(args []string) {
 		return
 	}
 
-	providedKey := ""
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--key" || args[i] == "-k" {
-			if i+1 < len(args) {
-				providedKey = args[i+1]
-				i++
-			}
-		}
-	}
+	providedKey := parseKeyArg(args)
 
 	pgpOn, _ := readSysfs(sysfsBase + "/pgp_active")
 
@@ -746,20 +772,29 @@ func doUnblock(args []string) {
 	fmt.Printf("%sBlocking disabled. Module still loaded.%s\n", colorGreen, colorNC)
 }
 
+// parseKeyArg returns the value of --key/-k, reading it from stdin when the
+// value is "-" so callers can keep the key out of the process list.
+func parseKeyArg(args []string) string {
+	for i := 0; i < len(args); i++ {
+		if (args[i] == "--key" || args[i] == "-k") && i+1 < len(args) {
+			if args[i+1] == "-" {
+				data, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+				if err != nil {
+					return ""
+				}
+				return strings.TrimSpace(string(data))
+			}
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 func doUnload(args []string) {
 	requiresRoot()
 
 	key := ""
-	providedKey := ""
-
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--key" || args[i] == "-k" {
-			if i+1 < len(args) {
-				providedKey = args[i+1]
-				i++
-			}
-		}
-	}
+	providedKey := parseKeyArg(args)
 
 	if providedKey != "" {
 		key = providedKey
@@ -1390,114 +1425,33 @@ func doCrash() {
 }
 
 func doWeb(args []string) {
-	bind := "127.0.0.1"
-	port := ""
+	listener, bind := listenPages(args, "/keys")
+	addr := listener.Addr().String()
 
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--port" && i+1 < len(args) {
-			port = args[i+1]
-			i++
-		} else if args[i] == "--bind" && i+1 < len(args) {
-			bind = args[i+1]
-			i++
-		}
-	}
-
-	if port == "" {
-		listener, err := net.Listen("tcp", bind+":0")
-		if err != nil {
-			log.Fatalf("Failed to listen: %v", err)
-		}
-		port = fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-		listener.Close()
-	}
-
-	addr := bind + ":" + port
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalf("Failed to listen on %s: %v", addr, err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", serveIndex)
-	mux.HandleFunc("/api/keys", handleAddKeyOnly)
-	mux.HandleFunc("/api/status", handleAPISStatus)
-	mux.HandleFunc("/api/kblocker-key", handleAPIKey)
-	mux.HandleFunc("/api/refresh-encryption", handleAPIRefreshEnc)
-
-	fmt.Printf("Kblocker web UI on http://%s\n", addr)
-	if bind == "127.0.0.1" {
-		fmt.Println("WARNING: Binds to localhost only. Do not expose publicly.")
+	fmt.Printf("%sKblocker key web UI on http://%s%s\n", colorCyan, addr, colorNC)
+	if ip := net.ParseIP(bind); ip != nil && ip.IsLoopback() {
+		fmt.Println("  Binds to localhost only. Do not expose publicly.")
 	}
 	if os.Geteuid() != 0 {
-		fmt.Println("WARNING: Not root — PGP key writes will fail.")
+		fmt.Println("  WARNING: Not root — PGP key writes will fail.")
 	}
 
+	log.Fatal(http.Serve(listener, withSameOrigin(newWebMux("keys"))))
+}
+
+func doUnblockWeb(args []string) {
+	listener, bind := listenPages(args, "/unblock")
+	addr := listener.Addr().String()
+
 	fmt.Printf("%sKblocker unblock-web UI on http://%s%s\n", colorCyan, addr, colorNC)
-	if bind == "127.0.0.1" {
+	if ip := net.ParseIP(bind); ip != nil && ip.IsLoopback() {
 		fmt.Println("  Binds to localhost only. Do not expose publicly.")
 	}
 	if os.Geteuid() != 0 {
 		fmt.Println("  WARNING: Not root — unblock writes will fail.")
 	}
 
-	log.Fatal(http.Serve(listener, withCORS(mux)))
-}
-
-func doUnblockWeb(args []string) {
-	bind := "127.0.0.1"
-	port := ""
-
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--port" && i+1 < len(args) {
-			port = args[i+1]
-			i++
-		} else if args[i] == "--bind" && i+1 < len(args) {
-			bind = args[i+1]
-			i++
-		}
-	}
-
-	if port == "" {
-		listener, err := net.Listen("tcp", bind+":0")
-		if err != nil {
-			log.Fatalf("Failed to listen: %v", err)
-		}
-		port = fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-		listener.Close()
-	}
-
-	addr := bind + ":" + port
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalf("Failed to listen on %s: %v", addr, err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", serveUnblockIndex)
-	mux.HandleFunc("/api/ciphertext-by-key", handleAPICiphertextByKey)
-	mux.HandleFunc("/api/unblock", handleAPIUnblock)
-	mux.HandleFunc("/api/status", handleAPISStatus)
-
-	fmt.Printf("%sKblocker unblock-web UI on http://%s%s\n", colorCyan, addr, colorNC)
-	if bind == "127.0.0.1" {
-		fmt.Println("  Binds to localhost only. Do not expose publicly.")
-	}
-
-	log.Fatal(http.Serve(listener, withCORS(mux)))
-}
-
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	log.Fatal(http.Serve(listener, withSameOrigin(newWebMux("unblock"))))
 }
 
 // ---- Web server handlers ----
@@ -1575,7 +1529,7 @@ input:focus { outline: none; border-color: #58a6ff; }
       <input type="email" id="key-email" name="email" placeholder="alice@example.com">
       <label for="key-cipher">Cipher</label>
       <select id="key-cipher" style="width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;">
-        <option value="curve25519">ECC Curve25519 (default)</option>
+        <option value="curve25519Legacy">ECC Curve25519 (default)</option>
         <option value="nistP256">ECC NIST P-256</option>
         <option value="nistP384">ECC NIST P-384</option>
         <option value="nistP521">ECC NIST P-521</option>
@@ -1600,7 +1554,7 @@ input:focus { outline: none; border-color: #58a6ff; }
 
 </div>
 
-<script src="https://unpkg.com/openpgp@5.11.2/dist/openpgp.min.js"></script>
+<script src="/openpgp.min.js"></script>
 <script>
 let generatedPrivKey = '';
 let generatedPubKey = '';
@@ -1765,10 +1719,10 @@ func readPGPKeyInfo(path string) (*keyEntry, error) {
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Split(line, ":")
 		if len(fields) >= 10 {
-			if fields[0] == "fpr" && fields[9] != "" {
+			if fields[0] == "fpr" && fields[9] != "" && entry.Fingerprint == "" {
 				entry.Fingerprint = fields[9]
 			}
-			if fields[0] == "uid" && fields[9] != "" {
+			if fields[0] == "uid" && fields[9] != "" && entry.User == "" {
 				entry.User = fields[9]
 			}
 		}
@@ -2155,7 +2109,7 @@ xsBNBGQ..."></textarea>
   </div>
 </div>
 
-<script src="https://unpkg.com/openpgp@5.11.2/dist/openpgp.min.js"></script>
+<script src="/openpgp.min.js"></script>
 <script>
 function loadKeyFile(event) {
   var file = event.target.files[0];

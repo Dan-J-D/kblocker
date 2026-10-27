@@ -23,7 +23,7 @@ sudo make install
 # register a PGP key (do this first)
 sudo kblockerctl add-pgp alice.pub
 
-# block YouTube for 60 minutes
+# block the default sites (social media) for 60 minutes
 sudo kblockerctl enable 60
 
 # check status
@@ -92,6 +92,54 @@ Without any key registered, `--insecure` mode prints the key to stdout instead:
 sudo kblockerctl enable 60 --insecure
 ```
 
+## Scheduled blocks
+
+`kblockerctl schedule set` stores a weekly schedule in `/etc/kblocker/schedule.json`,
+and `kblocker-scheduler.service` (installed and enabled by `make install`) starts a
+PGP-locked block whenever a window opens, lasting until the window closes:
+
+```json
+{ "blocks": [
+  { "id": "am", "name": "Morning focus", "days": [1,2,3,4,5], "start": "09:00", "end": "12:00", "enabled": true },
+  { "id": "pm", "name": "Afternoon focus", "days": [1,2,3,4,5], "start": "13:00", "end": "17:00", "enabled": true }
+] }
+```
+
+Days are numbered from Sunday (0) to Saturday (6); an end at or before the start runs
+past midnight. Each window is started once: unlocking it early with the key lifts it
+until the next window. The schedule can't be changed while a block is running. Scheduled
+blocks need at least one registered PGP key.
+
+The same service records every block, however it was started, in
+`/var/lib/kblocker/history.jsonl`; `kblockerctl history` summarizes it. It also hosts
+the key holder pages on `http://127.0.0.1:8737` (`/keys` to create and register a key,
+`/unblock` to decrypt the unload key in the browser and end a block).
+`sudo kblockerctl web-pages lan` opens them to other devices on your network,
+`local` limits them to this computer again, `custom --bind <ip>` listens on one
+address you choose (a VPN address, say) and `off` turns them off. Add `--port <port>`
+to any of them to move the pages; otherwise the port is kept. The setting is saved in
+a drop-in for the service, and `add-pgp-web` / `unblock-web` use the same address by
+default. All of it is also on the desktop app's Key holders and System pages. The pages only accept same-origin
+requests, and OpenPGP.js is built into `kblockerctl` rather than loaded from a CDN.
+
+## Desktop app
+
+`gui/` is a Tauri app (Astro + Svelte + Tailwind) covering status, starting blocks, the
+weekly schedule, history, sites, key holders and unlocking. It reads state directly and
+makes changes through `pkexec kblockerctl`, using the polkit policy that `make install`
+puts in place. Scheduled blocks and history don't depend on it: the scheduler service
+handles both.
+
+```sh
+cd gui
+pnpm install
+pnpm tauri dev      # run against the installed kblockerctl
+pnpm dev            # UI only, in a browser, with sample data
+pnpm tauri build    # .deb and AppImage in src-tauri/target/release/bundle
+```
+
+Linux builds need `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev`.
+
 ## Commands
 
 | Command | Description |
@@ -113,6 +161,12 @@ sudo kblockerctl enable 60 --insecure
 | `pgp-cipher <fingerprint>` | Print the PGP-encrypted unload key for a recipient |
 | `add-pgp-web [--port <port>] [--bind <ip>]` | Start web UI for browser-based PGP key generation |
 | `unblock-web [--port <port>] [--bind <ip>]` | Start web UI to decrypt and submit unblock key via browser |
+| `schedule [--json]` | Show scheduled blocks |
+| `schedule set <file \| ->` | Replace the weekly schedule (not while blocking) |
+| `schedule clear` | Remove all scheduled blocks |
+| `schedule-daemon` | Start scheduled blocks, record history and host the key holder pages (run by `kblocker-scheduler.service`) |
+| `web-pages [off \| local \| lan \| custom --bind <ip>] [--port <port>]` | Show or set where the scheduler service hosts the key holder pages |
+| `history [--json]` | Show past blocks and time spent blocking |
 | `crash` | Force-remove module (triggers kernel panic) |
 
 ## Architecture

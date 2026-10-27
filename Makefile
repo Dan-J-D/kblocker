@@ -14,8 +14,8 @@ DESTDIR ?=
 all: kblockerctl
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
 
-kblockerctl: cmd/kblockerctl/main.go
-	go build -o kblockerctl cmd/kblockerctl/main.go
+kblockerctl: $(wildcard cmd/kblockerctl/*.go)
+	go build -o kblockerctl $(filter-out %_test.go,$(wildcard cmd/kblockerctl/*.go))
 
 kfuzz: cmd/fuzz/main.go
 	go build -o kfuzz cmd/fuzz/main.go
@@ -37,6 +37,8 @@ deb: kblockerctl
 	find "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}" -name '.gitignore' -delete 2>/dev/null || true; \
 	install -d "$$PKG_DIR/etc/kblocker/keys"; \
 	install -d "$$PKG_DIR/var/lib/kblocker"; \
+	install -D -m 644 packaging/kblocker-scheduler.service "$$PKG_DIR/etc/systemd/system/kblocker-scheduler.service"; \
+	install -D -m 644 packaging/dev.kblocker.ctl.policy "$$PKG_DIR/usr/share/polkit-1/actions/dev.kblocker.ctl.policy"; \
 	install -d "$$DEB_DIR"; \
 	sed 's/ARCH/'"$$ARCH"'/g; s/^Version:.*/Version: '$$VERSION'/' debian/control > "$$DEB_DIR/control"; \
 	install -m 644 debian/changelog "$$DEB_DIR/changelog"; \
@@ -80,12 +82,15 @@ install: all
 	install -d $(DESTDIR)/etc/kblocker
 	install -d $(DESTDIR)/etc/kblocker/keys
 	install -d $(DESTDIR)/var/lib/kblocker
+	install -D -m 644 packaging/kblocker-scheduler.service $(DESTDIR)/etc/systemd/system/kblocker-scheduler.service
+	install -D -m 644 packaging/dev.kblocker.ctl.policy $(DESTDIR)/usr/share/polkit-1/actions/dev.kblocker.ctl.policy
 	@KO_FILE="/lib/modules/$(shell uname -r)/extra/kblocker.ko"; \
 	if command -v chattr >/dev/null 2>&1; then \
 		chattr +i "$$KO_FILE" 2>/dev/null && echo "  File: immutable" || echo "  Warning: could not set immutable flag"; \
 	fi
 	modprobe kblocker 2>/dev/null || true
-	@/usr/local/bin/kblockerctl block youtube.com www.youtube.com m.youtube.com youtu.be ytimg.com googlevideo.com gvt2.com 2>/dev/null || true
+	@systemctl daemon-reload 2>/dev/null && systemctl enable --now kblocker-scheduler.service 2>/dev/null || true
+	@/usr/local/bin/kblockerctl block facebook.com fbcdn.net instagram.com cdninstagram.com x.com twitter.com twimg.com tiktok.com tiktokcdn.com reddit.com redd.it snapchat.com threads.net bsky.app 2>/dev/null || true
 	@echo ""
 	@echo "kblocker installed (disabled by default)."
 	@echo "  kblockerctl enable 60   — block for 60 minutes"
@@ -127,6 +132,9 @@ uninstall:
 	@if [ -d /var/lib/kblocker ]; then \
 		find /var/lib/kblocker -type f -exec chattr -i {} \; 2>/dev/null || true; \
 	fi
+	@systemctl disable --now kblocker-scheduler.service 2>/dev/null || true
+	rm -f $(DESTDIR)/etc/systemd/system/kblocker-scheduler.service
+	rm -f $(DESTDIR)/usr/share/polkit-1/actions/dev.kblocker.ctl.policy
 	rm -f $(DESTDIR)/etc/modules-load.d/kblocker.conf
 	rm -f $(DESTDIR)/usr/local/bin/kblockerctl
 	@KO_FILE="$(DESTDIR)/lib/modules/$(shell uname -r)/extra/kblocker.ko"; \

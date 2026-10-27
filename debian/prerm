@@ -3,6 +3,7 @@ set -e
 
 case "$1" in
     remove|upgrade|deconfigure)
+        systemctl disable --now kblocker-scheduler.service 2>/dev/null || true
         dkms remove kblocker/2.0 --all 2>/dev/null || true
 
         if [ -d /sys/kernel/kblocker ]; then
