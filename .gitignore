@@ -1,3 +1,6 @@
+.claude/
+.claudeignore
+
 kfuzz
 kblockerctl
 *.ko
