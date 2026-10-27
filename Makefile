@@ -132,6 +132,12 @@ uninstall:
 	depmod -a
 	@echo "kblocker uninstalled."
 
+syz-setup:
+	fuzz/syzkaller/setup.sh all
+
+syz-run:
+	fuzz/syzkaller/setup.sh run
+
 test:
 	@echo "Running integration tests (requires root)..."
 	@if [ "$(shell id -u)" -ne 0 ]; then \
@@ -144,4 +150,4 @@ test:
 %:
 	@:
 
-.PHONY: all clean install uninstall test kblockerctl
+.PHONY: all clean install uninstall test kblockerctl syz-setup syz-run

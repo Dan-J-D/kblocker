@@ -1,0 +1,198 @@
+# syzkaller descriptions for the kblocker module (/sys/kernel/kblocker).
+#
+# Covers the sysfs control surface, the TLS ClientHello/SNI parser reached
+# through TCP traffic (including TCP Fast Open), the UDP/443 path, and the
+# file-protection hooks reached through operations on protected paths.
+#
+# The module must be loaded with hook_all_netns=1: syz-executor runs each
+# test process in its own network namespace.
+
+resource fd_kblocker_ro[fd]
+resource fd_kblocker_enabled[fd]
+resource fd_kblocker_domains[fd]
+resource fd_kblocker_ips[fd]
+resource fd_kblocker_pgp[fd]
+resource fd_kblocker_key[fd]
+
+openat$kblocker_ro(fd const[AT_FDCWD], file ptr[in, string[kblocker_ro_files]], flags const[O_RDONLY], mode const[0]) fd_kblocker_ro
+openat$kblocker_enabled(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/enabled"]], flags const[O_RDWR], mode const[0]) fd_kblocker_enabled
+openat$kblocker_domains(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/blocked_domains"]], flags const[O_RDWR], mode const[0]) fd_kblocker_domains
+openat$kblocker_ips(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/blocked_ips"]], flags const[O_RDWR], mode const[0]) fd_kblocker_ips
+openat$kblocker_pgp(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/pgp_active"]], flags const[O_RDWR], mode const[0]) fd_kblocker_pgp
+openat$kblocker_key(fd const[AT_FDCWD], file ptr[in, string[kblocker_key_files]], flags const[O_RDWR], mode const[0]) fd_kblocker_key
+
+kblocker_ro_files = "/sys/kernel/kblocker/status", "/sys/kernel/kblocker/remaining", "/sys/kernel/kblocker/block_count", "/sys/kernel/kblocker/key", "/sys/kernel/kblocker/enabled", "/sys/kernel/kblocker/blocked_domains", "/sys/kernel/kblocker/blocked_ips", "/sys/kernel/kblocker/pgp_active"
+kblocker_key_files = "/sys/kernel/kblocker/disable", "/sys/kernel/kblocker/unblock"
+
+read$kblocker(fd fd_kblocker_ro, buf buffer[out], len len[buf])
+
+# Session lengths are kept short so the fuzzer is not locked out of the
+# disabled-only paths for long; out-of-range and malformed values are kept.
+write$kblocker_enabled(fd fd_kblocker_enabled, buf ptr[in, stringnoz[kblocker_seconds]], len bytesize[buf])
+write$kblocker_enabled_int(fd fd_kblocker_enabled, buf ptr[in, fmt[dec, int8[0:5]]], len bytesize[buf])
+kblocker_seconds = "0", "1", "2", "3", "5", "0\n", "1\n", "2\n", "-1", "0x3", "03", "1 ", "abc", "", "18446744073709551615", "315360001", "99999999999999999999"
+
+write$kblocker_domains(fd fd_kblocker_domains, buf ptr[in, array[kblocker_domain_line]], len bytesize[buf])
+write$kblocker_domains_raw(fd fd_kblocker_domains, buf buffer[in], len bytesize[buf])
+
+kblocker_domain_line {
+	name	stringnoz[kblocker_domain_inputs]
+	nl	const[0xa, int8]
+} [packed]
+
+# Names as written to sysfs, including forms the module must normalize or
+# reject.
+kblocker_domain_inputs = "youtube.com", "x.com", "www.example.org", "*.reddit.com", ".example.org.", "WWW.YouTube.COM", "#comment", "bad domain", "a,b.com", "a:b", "", " ", "localhost", "xn--bcher-kva.example"
+
+write$kblocker_ips(fd fd_kblocker_ips, buf ptr[in, array[kblocker_ip_line]], len bytesize[buf])
+write$kblocker_ips_raw(fd fd_kblocker_ips, buf buffer[in], len bytesize[buf])
+
+kblocker_ip_line {
+	addr	stringnoz[kblocker_ip_inputs]
+	nl	const[0xa, int8]
+} [packed]
+
+kblocker_ip_inputs = "127.0.0.1", "127.0.0.2", "10.0.0.1", "172.20.20.170", "::1", "fe80::aa", "fe88::", "1.2.3", "not-an-ip", "#10.0.0.2", ""
+
+write$kblocker_pgp(fd fd_kblocker_pgp, buf ptr[in, stringnoz[kblocker_bools]], len bytesize[buf])
+kblocker_bools = "0", "1", "0\n", "1\n", "y", "n", "true", "on", "2", ""
+
+write$kblocker_key(fd fd_kblocker_key, buf ptr[in, kblocker_hex_key], len bytesize[buf])
+write$kblocker_key_raw(fd fd_kblocker_key, buf buffer[in], len bytesize[buf])
+
+kblocker_hex_key {
+	digits	array[flags[kblocker_hex_digits, int8], 32]
+	nl	array[const[0xa, int8], 0:1]
+} [packed]
+
+kblocker_hex_digits = 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x41, 0x46, 0x67
+
+# TLS traffic. Sent on connected sockets, or in the SYN with MSG_FASTOPEN.
+sendto$kblocker_tls(fd sock_in, buf ptr[in, kblocker_tls_payload], len bytesize[buf], f flags[send_flags], addr ptr[in, sockaddr_in, opt], addrlen len[addr])
+sendto$kblocker_tls6(fd sock_in6, buf ptr[in, kblocker_tls_payload], len bytesize[buf], f flags[send_flags], addr ptr[in, sockaddr_in6, opt], addrlen len[addr])
+sendto$kblocker_tfo(fd sock_tcp, buf ptr[in, kblocker_tls_payload], len bytesize[buf], f const[MSG_FASTOPEN], addr ptr[in, sockaddr_in], addrlen len[addr])
+sendto$kblocker_tfo6(fd sock_tcp6, buf ptr[in, kblocker_tls_payload], len bytesize[buf], f const[MSG_FASTOPEN], addr ptr[in, sockaddr_in6], addrlen len[addr])
+
+# QUIC-like UDP/443 traffic
+sendto$kblocker_udp443(fd sock_udp, buf buffer[in], len bytesize[buf], f const[0], addr ptr[in, kblocker_sockaddr_in_443], addrlen len[addr])
+sendto$kblocker_udp443_6(fd sock_udp6, buf buffer[in], len bytesize[buf], f const[0], addr ptr[in, kblocker_sockaddr_in6_443], addrlen len[addr])
+
+kblocker_sockaddr_in_443 {
+	family	const[AF_INET, int16]
+	port	const[443, int16be]
+	addr	ipv4_addr
+} [size[16]]
+
+kblocker_sockaddr_in6_443 {
+	family		const[AF_INET6, int16]
+	port		const[443, int16be]
+	flow		int32
+	addr		ipv6_addr
+	scope_id	int32
+}
+
+kblocker_tls_payload [
+	hello	kblocker_tls_record
+	split	kblocker_tls_record_prefix
+	raw	array[int8]
+] [varlen]
+
+kblocker_tls_record {
+	type	const[0x16, int8]
+	ver	int16be[0x300:0x304]
+	len	bytesize[hs, int16be]
+	hs	kblocker_tls_handshake
+} [packed]
+
+# A record header announcing more bytes than are sent, as when a
+# ClientHello spans segments.
+kblocker_tls_record_prefix {
+	type	const[0x16, int8]
+	ver	const[0x301, int16be]
+	len	int16be[0:0x4000]
+	hs	kblocker_tls_handshake
+} [packed]
+
+kblocker_tls_handshake {
+	type	int8[0:2]
+	len_hi	const[0, int8]
+	len	bytesize[body, int16be]
+	body	kblocker_client_hello
+} [packed]
+
+kblocker_client_hello {
+	ver	const[0x303, int16be]
+	random	array[int8, 32]
+	sid_len	len[sid, int8]
+	sid	array[int8, 0:32]
+	cs_len	bytesize[cs, int16be]
+	cs	array[int16be, 1:16]
+	cm_len	len[cm, int8]
+	cm	array[int8, 1:2]
+	ext_len	bytesize[ext, int16be]
+	ext	array[kblocker_tls_ext]
+} [packed]
+
+kblocker_tls_ext [
+	sni	kblocker_ext_sni
+	ech	kblocker_ext_ech
+	pad	kblocker_ext_padding
+	other	kblocker_ext_other
+] [varlen]
+
+kblocker_ext_sni {
+	type	const[0x0, int16be]
+	len	bytesize[list, int16be]
+	list	kblocker_sni_list
+} [packed]
+
+kblocker_sni_list {
+	len	bytesize[names, int16be]
+	names	array[kblocker_sni_name, 1:2]
+} [packed]
+
+kblocker_sni_name {
+	type	int8[0:1]
+	len	bytesize[name, int16be]
+	name	stringnoz[kblocker_sni_hosts]
+} [packed]
+
+# Hosts as they appear on the wire: exact, subdomain, suffix-but-not-
+# subdomain, mixed case, trailing dot, and unrelated names.
+kblocker_sni_hosts = "youtube.com", "www.youtube.com", "notyoutube.com", "x.com", "netflix.com", "WWW.X.COM.", "reddit.com", "a.b.reddit.com", "example.org", "cloudflare-ech.com", ""
+
+# Encrypted Client Hello (current and draft codepoints)
+kblocker_ext_ech {
+	type	flags[kblocker_ech_types, int16be]
+	len	bytesize[data, int16be]
+	data	array[int8, 0:64]
+} [packed]
+
+kblocker_ech_types = 0xfe0d, 0xfe0a, 0xfe08
+
+# Moves later extensions past the first segment and past offset 512
+kblocker_ext_padding {
+	type	const[0x15, int16be]
+	len	bytesize[data, int16be]
+	data	array[int8, 0:2048]
+} [packed]
+
+kblocker_ext_other {
+	type	int16be
+	len	bytesize[data, int16be]
+	data	array[int8, 0:32]
+} [packed]
+
+# Operations against protected files. While a session is enabled these must
+# fail; while disabled they must succeed.
+openat$kblocker_protected(fd const[AT_FDCWD], file ptr[in, string[kblocker_protected_paths]], flags flags[open_flags], mode flags[open_mode]) fd
+unlink$kblocker(path ptr[in, string[kblocker_protected_paths]])
+rename$kblocker(old ptr[in, string[kblocker_protected_paths]], new ptr[in, filename])
+rename$kblocker_over(old ptr[in, filename], new ptr[in, string[kblocker_protected_paths]])
+link$kblocker(old ptr[in, string[kblocker_protected_paths]], new ptr[in, filename])
+truncate$kblocker(file ptr[in, string[kblocker_protected_paths]], len intptr)
+chmod$kblocker(file ptr[in, string[kblocker_protected_paths]], mode flags[open_mode])
+mount$kblocker_bind(src ptr[in, filename], dst ptr[in, string[kblocker_protected_paths]], type const[0], flags const[MS_BIND], data const[0])
+umount2$kblocker(path ptr[in, string[kblocker_protected_paths]], flags flags[umount_flags])
+
+kblocker_protected_paths = "/etc/hosts", "/etc/modules-load.d/kblocker.conf", "/var/lib/kblocker/state"

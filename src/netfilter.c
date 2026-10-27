@@ -1,4 +1,5 @@
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/ip.h>
@@ -11,6 +12,7 @@
 #include <linux/string.h>
 #include <linux/spinlock.h>
 #include <net/ip.h>
+#include <net/net_namespace.h>
 #include <net/ipv6.h>
 #include <net/tcp.h>
 #include "kblocker.h"
@@ -19,10 +21,22 @@
 #define TLS_MAX_RECORD (5 + 16384)
 #define TLS_EXT_SERVER_NAME 0x0000
 
-static struct nf_hook_ops nfho_out;
-static struct nf_hook_ops nfho_forward;
+/* [0] LOCAL_OUT, [1] FORWARD; filled in by kblocker_register_netfilter().
+ * Must be static: netfilter keeps pointers to the registered ops. */
+static struct nf_hook_ops kb_ops[2];
 static bool out_registered;
 static bool forward_registered;
+
+/*
+ * By default only the initial network namespace is filtered; traffic from
+ * other namespaces reaches the host through FORWARD. Fuzzers such as
+ * syzkaller run every test process in a fresh namespace, so they set this
+ * to reach the packet parsers.
+ */
+static bool hook_all_netns;
+module_param(hook_all_netns, bool, 0444);
+MODULE_PARM_DESC(hook_all_netns, "Filter traffic in every network namespace (for fuzzing)");
+static bool pernet_registered;
 
 static bool is_ip_blocked(__be32 addr)
 {
@@ -307,28 +321,50 @@ void log_blocklist_on_disable(void)
 	spin_unlock_bh(&ip_list_lock);
 }
 
+static int __net_init kb_net_init(struct net *net)
+{
+	return nf_register_net_hooks(net, kb_ops, ARRAY_SIZE(kb_ops));
+}
+
+static void __net_exit kb_net_exit(struct net *net)
+{
+	nf_unregister_net_hooks(net, kb_ops, ARRAY_SIZE(kb_ops));
+}
+
+static struct pernet_operations kb_net_ops = {
+	.init = kb_net_init,
+	.exit = kb_net_exit,
+};
+
 int kblocker_register_netfilter(void)
 {
-	int ret;
+	int ret, i;
 
-	nfho_out.hook = kblocker_hook;
-	nfho_out.hooknum = NF_INET_LOCAL_OUT;
-	nfho_out.pf = NFPROTO_INET;
-	nfho_out.priority = NF_IP_PRI_FILTER;
+	for (i = 0; i < ARRAY_SIZE(kb_ops); i++) {
+		kb_ops[i].hook = kblocker_hook;
+		kb_ops[i].pf = NFPROTO_INET;
+		kb_ops[i].priority = NF_IP_PRI_FILTER;
+	}
+	kb_ops[0].hooknum = NF_INET_LOCAL_OUT;
+	kb_ops[1].hooknum = NF_INET_FORWARD;
 
-	ret = nf_register_net_hook(&init_net, &nfho_out);
+	if (hook_all_netns) {
+		/* Also covers init_net */
+		ret = register_pernet_subsys(&kb_net_ops);
+		if (ret)
+			return ret;
+		pernet_registered = true;
+		return 0;
+	}
+
+	ret = nf_register_net_hook(&init_net, &kb_ops[0]);
 	if (ret) {
 		printk(KERN_ERR "kblocker: failed to register LOCAL_OUT hook\n");
 		return ret;
 	}
 	out_registered = true;
 
-	nfho_forward.hook = kblocker_hook;
-	nfho_forward.hooknum = NF_INET_FORWARD;
-	nfho_forward.pf = NFPROTO_INET;
-	nfho_forward.priority = NF_IP_PRI_FILTER;
-
-	if (nf_register_net_hook(&init_net, &nfho_forward))
+	if (nf_register_net_hook(&init_net, &kb_ops[1]))
 		printk(KERN_WARNING "kblocker: FORWARD hook failed (non-fatal)\n");
 	else
 		forward_registered = true;
@@ -337,12 +373,16 @@ int kblocker_register_netfilter(void)
 
 void kblocker_cleanup_netfilter(void)
 {
+	if (pernet_registered) {
+		unregister_pernet_subsys(&kb_net_ops);
+		pernet_registered = false;
+	}
 	if (forward_registered) {
-		nf_unregister_net_hook(&init_net, &nfho_forward);
+		nf_unregister_net_hook(&init_net, &kb_ops[1]);
 		forward_registered = false;
 	}
 	if (out_registered) {
-		nf_unregister_net_hook(&init_net, &nfho_out);
+		nf_unregister_net_hook(&init_net, &kb_ops[0]);
 		out_registered = false;
 	}
 }

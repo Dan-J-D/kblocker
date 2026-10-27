@@ -192,3 +192,14 @@ sudo ./test.sh
 ```
 
 Runs integration tests against the live kernel module via sysfs.
+
+### Fuzzing
+
+`cmd/fuzz` is a quick black-box fuzzer for the sysfs interface on the host.
+For coverage-guided fuzzing of the whole module (sysfs, the TLS/SNI parser via
+real traffic, and the file-protection hooks) under KASAN and lockdep in
+throwaway VMs, see [fuzz/syzkaller](fuzz/syzkaller/README.md):
+
+```sh
+make syz-setup && make syz-run
+```
