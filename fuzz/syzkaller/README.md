@@ -20,7 +20,9 @@ What the descriptions in `kblocker.txt` exercise:
   racing with sessions being enabled and disabled
 - boot-time recovery from the state file: the fuzzer rewrites the state file
   with valid, torn and legacy records while no session is active, then
-  triggers recovery through `debug_restore` (a debug-build-only attribute)
+  triggers a simulated reboot through `debug_restore` (a debug-build-only
+  attribute that drops the in-memory session, keeps the files and runs
+  recovery as at module init)
 - the periodic `remaining:` appends, which debug builds make every 2 seconds
   instead of every 60
 

@@ -83,6 +83,9 @@ int enable_blocking(u64 seconds);
 void disable_blocking(void);
 u64 remaining_seconds(void);
 void try_restore_state_from_disk(void);
+#ifdef KBLOCKER_DEBUG
+void kb_debug_reboot(void);
+#endif
 void state_file_clear(void);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)

@@ -467,10 +467,37 @@ out:
 	kfree(copy);
 }
 
+#ifdef KBLOCKER_DEBUG
+/*
+ * Simulate a reboot for the fuzzer: everything held in memory is lost
+ * (the session, its key, the hooks, the block lists) while the files stay
+ * as they are, then recovery runs as at module init. Caller holds kb_lock.
+ */
+void kb_debug_reboot(void)
+{
+	if (enabled) {
+		stop_session();
+		protection_disable();
+		state_file_close();
+	}
+	spin_lock_bh(&ip_list_lock);
+	WRITE_ONCE(blocked_count_v4, 0);
+	WRITE_ONCE(blocked_count_v6, 0);
+	WRITE_ONCE(blocked_domain_count, 0);
+	spin_unlock_bh(&ip_list_lock);
+	WRITE_ONCE(state_restored, false);
+	WRITE_ONCE(allow_unload, false);
+
+	try_restore_state_from_disk();
+	if (!state_restored)
+		generate_unload_key();
+}
+#endif
+
 /*
  * Called once from module init, under kb_lock. This is the only way a
  * session can be restored; release builds have no sysfs interface for it
- * (KBLOCKER_DEBUG builds add debug_restore for fuzzing).
+ * (KBLOCKER_DEBUG builds add debug_restore, see kb_debug_reboot()).
  */
 void try_restore_state_from_disk(void)
 {

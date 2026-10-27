@@ -282,17 +282,17 @@ static struct kobj_attribute disable_attr = __ATTR_WO(disable);
 
 #ifdef KBLOCKER_DEBUG
 /*
- * Run the boot-time state recovery again, so a fuzzer that rewrites the
- * state file while disabled can reach its parser without reloading the
- * module. Never built into release modules: it would let anyone who can
- * write the state file start a locked session.
+ * Simulate a reboot (kb_debug_reboot), so a fuzzer that rewrites the state
+ * file can reach recovery without reloading the module. Never built into
+ * release modules: it ends sessions without the key and lets anyone who
+ * can write the state file start a locked one.
  */
 static ssize_t debug_restore_store(struct kobject *kobj,
 				   struct kobj_attribute *attr,
 				   const char *buf, size_t count)
 {
 	mutex_lock(&kb_lock);
-	try_restore_state_from_disk();
+	kb_debug_reboot();
 	kb_unlock();
 	return count;
 }

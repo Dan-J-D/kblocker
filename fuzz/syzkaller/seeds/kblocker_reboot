@@ -1,0 +1,10 @@
+# Reboot during a PGP session: the kernel persists the session, the
+# simulated reboot drops it and recovers it from the state file
+r0 = openat$kblocker_pgp(0xffffffffffffff9c, &(0x7f0000000000)='/sys/kernel/kblocker/pgp_active\x00', 0x2, 0x0)
+write$kblocker_pgp(r0, &(0x7f0000000100)={'1', []}, 0x1)
+r1 = openat$kblocker_enabled(0xffffffffffffff9c, &(0x7f0000000200)='/sys/kernel/kblocker/enabled\x00', 0x2, 0x0)
+write$kblocker_enabled(r1, &(0x7f0000000300)={'5', []}, 0x1)
+r2 = openat$kblocker_restore(0xffffffffffffff9c, &(0x7f0000000400)='/sys/kernel/kblocker/debug_restore\x00', 0x1, 0x0)
+write$kblocker_restore(r2, &(0x7f0000000500)='1\x00', 0x2)
+r3 = openat$kblocker_ro(0xffffffffffffff9c, &(0x7f0000000600)='/sys/kernel/kblocker/status\x00', 0x0, 0x0)
+read$kblocker(r3, &(0x7f0000000700)=""/128, 0x80)
