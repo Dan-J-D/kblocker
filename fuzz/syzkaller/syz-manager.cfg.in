@@ -8,6 +8,7 @@
 	"sshkey": "@WORK@/image/trixie.id_rsa",
 	"syzkaller": "@WORK@/syzkaller",
 	"procs": @PROCS@,
+	"ignores": [@IGNORES@],
 	"sandbox": "none",
 	"type": "qemu",
 	"vm": {

@@ -1,0 +1,13 @@
+# Core-kernel KCSAN races that do not involve kblocker, one regexp per line.
+# syz-manager matches them against the first line of the report
+# ("BUG: KCSAN: data-race in ...") and drops matches without saving or
+# reproducing them. Keep them exact: "pids_release" alone would also hide
+# "pids_release / <kblocker function>". A one-sided race ("race at unknown
+# origin") prints a single "func+off/size", a two-sided one "f1 / f2".
+
+# idle loop vs. timer interrupt on the same CPU over the got_idle_tick flag
+KCSAN: data-race in (tick_nohz_handler|tick_nohz_idle_got_tick) / (tick_nohz_handler|tick_nohz_idle_got_tick)
+# PROVE_RCU check of PF_EXITING while the exiting task sets PF_NOFREEZE
+KCSAN: data-race in pids_release\+
+# WARN_ON_ONCE(mm == current->active_mm) while lazy-TLB shootdown switches it
+KCSAN: data-race in __mmdrop\+

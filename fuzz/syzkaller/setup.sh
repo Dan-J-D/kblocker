@@ -161,7 +161,17 @@ stage_image() {
 }
 
 stage_config() {
-	sed -e "s|@WORK@|$WORK|g" -e "s|@VMS@|$VMS|g" -e "s|@PROCS@|$PROCS|g" \
+	# kcsan-ignores as a JSON string list: drop comments and blank lines,
+	# escape backslashes and quotes, quote each line, join with commas
+	local ignores=""
+	if [[ $SANITIZER == kcsan ]]; then
+		ignores=$(grep -v -e '^#' -e '^[[:space:]]*$' "$HERE/kcsan-ignores" |
+			sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/.*/"&"/' | paste -sd, -)
+	fi
+	# "|" is the sed delimiter, so escape the regexps' alternations (and
+	# the backslashes and "&" that sed would otherwise interpret)
+	ignores=$(printf '%s' "$ignores" | sed -e 's/[\\&|]/\\&/g')
+	sed -e "s|@IGNORES@|$ignores|" -e "s|@WORK@|$WORK|g" -e "s|@VMS@|$VMS|g" -e "s|@PROCS@|$PROCS|g" \
 		-e "s|@PORT@|$PORT|g" -e "s|@WORKDIR@|$WORK/workdir$SFX|g" \
 		-e "s|@LINUX@|$LINUX|g" -e "s|@MODULE@|$MODULE|g" -e "s|@IMAGE@|$IMAGE|g" \
 		"$HERE/syz-manager.cfg.in" > "$WORK/syz-manager$SFX.cfg"

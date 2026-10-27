@@ -66,7 +66,10 @@ KASAN setup without disturbing that corpus. The syzkaller build and the
 base image are shared.
 
 KCSAN also reports races in the core kernel that have nothing to do with
-kblocker. Look for reports where a stack goes through kblocker's code.
+kblocker. Once such a race has been checked, add a regexp for it to
+`kcsan-ignores` and rerun `setup.sh config`: syz-manager then drops it
+instead of spending VMs on reproducing it. Match the exact report line so
+the same function racing with kblocker code is still reported.
 
 `KBLOCKER_DEBUG` also checks kblocker's session invariants each time
 `kb_lock` is released (`kb_check_invariants()` in `src/state.c`). A violated
