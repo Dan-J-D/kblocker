@@ -22,3 +22,6 @@ KCSAN: data-race in hrtimer_wakeup / (futex_do_wait|do_nanosleep|schedule_hrtime
 # blk-mq tag allocation: sbitmap scans a word locklessly as a hint and claims
 # the bit with an atomic test_and_set_bit, retrying if it lost
 KCSAN: data-race in (_find_next_zero_bit|sbitmap_find_bit) / (_find_next_zero_bit|sbitmap_find_bit)
+# e1000 reads an RX descriptor's status byte that the (emulated) NIC writes by
+# DMA; KCSAN cannot see device writes, so the origin is unknown
+KCSAN: data-race in e1000_clean_rx_irq\+
