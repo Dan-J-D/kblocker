@@ -11,3 +11,6 @@ KCSAN: data-race in (tick_nohz_handler|tick_nohz_idle_got_tick) / (tick_nohz_han
 KCSAN: data-race in pids_release\+
 # WARN_ON_ONCE(mm == current->active_mm) while lazy-TLB shootdown switches it
 KCSAN: data-race in __mmdrop\+
+# lockless thread_group_empty() fast path in exit_signals while a sibling
+# thread unhashes itself; the slow path rechecks under siglock
+KCSAN: data-race in (exit_signals|release_task) / (exit_signals|release_task)
