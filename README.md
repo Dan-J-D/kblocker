@@ -1,286 +1,178 @@
-# kblocker
+<div align="center">
 
-A kernel-level internet blocker designed to remove your ability to break your own focus. Once enabled, it blocks access to configured domains by dropping matching TCP connections via netfilter and null-routing them via `/etc/hosts`. The key needed to disable or unload the module can be encrypted to trusted recipients and erased from kernel memory, making the decision to unblock a deliberate, collaborative act rather than an impulse.
+# 🔒 kblocker
 
-## Use case
+**A kernel-level site blocker you can't talk yourself out of.**
 
-You want to block distracting sites and make it *genuinely hard* to disable the blocker even for yourself. The goal isn't just to block, but to remove your own agency to undo it in a moment of weakness.
+kblocker drops connections to distracting sites from inside the Linux kernel, then locks the off switch<br>
+with a key only someone you trust can open. Ending a block early becomes a conversation, not an impulse.
 
-- The kernel module hooks `NF_INET_LOCAL_OUT` and `NF_INET_FORWARD`, inspects TLS SNI, and drops matching connections
-- Disabling or unloading requires a 128-bit key, validated against a SHA-256 hash stored in the kernel
-- With PGP mode, the key is encrypted to your trusted recipients' GPG public keys and then **erased from kernel memory**. The only way to retrieve it is to have someone else PGP-decrypt it. You've outsourced your willpower.
-- While a session is enabled, the module file, auto-load config, hosts file and state file are protected by kernel-set immutable/append-only flags and `inode_operations` overrides (which also refuse `chattr`), re-checked every second. Nothing is protected while disabled.
-- Domain rules match the exact name or any subdomain (`x.com` blocks `www.x.com`, not `netflix.com`). While domains are blocked, QUIC (UDP/443) is dropped so browsers fall back to TCP where SNI is visible.
-- Sessions are timed with the boot-time clock, so changing the system clock cannot end them. A PGP session is persisted by the kernel itself and restored when the module loads; time spent powered off does not count towards the session.
-- Requires Linux 6.3 or newer.
+![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)
+![Linux 6.3+](https://img.shields.io/badge/Linux-6.3%2B-FCC624?logo=linux&logoColor=black)
+![Go](https://img.shields.io/badge/kblockerctl-Go-00ADD8?logo=go&logoColor=white)
+![Tauri](https://img.shields.io/badge/desktop-Tauri%20v2-24C8DB?logo=tauri)
 
-## Quick start
+<img alt="kblocker's Now page during a PGP-locked block: today's timeline, the blocked sites and upcoming scheduled blocks" src="docs/screenshots/now-active.png">
+
+</div>
+
+## 🤔 Why kblocker?
+
+Most blockers are a browser extension or a hosts file away from being turned off, and the person most likely to turn them off is you. kblocker is built to remove your own agency in that moment of weakness.
+
+- 🧱 **Blocks in the kernel.** A netfilter module inspects the TLS SNI of outgoing connections and drops the ones you've blocked, in every browser and app. QUIC is dropped during a block so nothing sneaks past over UDP.
+- 🔑 **The off switch needs a key.** Disabling or unloading the module takes a 128-bit key, checked against a SHA-256 hash held in the kernel.
+- 🤝 **Someone else holds that key.** With PGP mode the key is encrypted to your key holders (a friend, a partner) and then **erased from kernel memory**. You've outsourced your willpower.
+- 🛡️ **Hard to tamper with.** During a block the module, its auto-load config, `/etc/hosts` and the state file are made immutable by the kernel itself, and `chattr` is refused.
+- ⏱️ **The clock can't be cheated.** Blocks run on the boot-time clock, so changing the system time does nothing, and a locked block survives a reboot.
+- 🗓️ **Runs on a schedule.** Set weekly focus windows and a service starts a locked block whenever one opens, and keeps a history of every block.
+
+## 📸 Screenshots
+
+All screenshots show the real desktop app with its built-in demo data.
+
+<table>
+  <tr>
+    <td width="50%">
+      <b>Start a block</b>: pick a length and lock it to your key holders<br><br>
+      <img alt="Now page while not blocking, with the Start a block panel" src="docs/screenshots/now-idle.png">
+    </td>
+    <td width="50%">
+      <b>Weekly schedule</b>: drag across the week to add focus blocks<br><br>
+      <img alt="Weekly schedule with morning and afternoon focus blocks on weekdays" src="docs/screenshots/schedule.png">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <b>Key holders</b>: the people who can end a block early<br><br>
+      <img alt="Key holders page with two registered PGP keys" src="docs/screenshots/holders.png">
+    </td>
+    <td width="50%">
+      <b>Unlock</b>: ask a key holder, then enter what they send back<br><br>
+      <img alt="Unlock page with steps to ask a key holder and enter the unload key" src="docs/screenshots/unlock.png">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <b>History</b>: time blocked per day, streaks and every past block<br><br>
+      <img alt="History page with a bar chart of time blocked per day and a list of recent blocks" src="docs/screenshots/history.png">
+    </td>
+    <td width="50%">
+      <b>Sites</b>: quick-add whole categories; subdomains included<br><br>
+      <img alt="Sites page with quick-add categories and the list of blocked sites" src="docs/screenshots/sites.png">
+    </td>
+  </tr>
+</table>
+
+## 🚀 Quick start
+
+You need Linux 6.3 or newer, kernel headers (`linux-headers-$(uname -r)`) and Go 1.21+.
+
+**1. Build and install**
 
 ```sh
-# build and install
 sudo make install
+```
 
-# register a PGP key (do this first)
-sudo kblockerctl add-pgp alice.pub
+This loads the module (disabled), installs `kblockerctl`, enables the scheduler service and blocks a starter list of social media sites.
 
-# block the default sites (social media) for 60 minutes
+**2. Add a key holder**
+
+```sh
+sudo kblockerctl add-pgp sam.pub
+```
+
+No PGP key handy? Run `sudo kblockerctl web-pages lan` and send them `http://<your-machine>:8737/keys`: they create a key in their browser and it registers itself. The private key never leaves their browser.
+
+**3. Block for an hour**
+
+```sh
 sudo kblockerctl enable 60
-
-# check status
 sudo kblockerctl status
-
-# disable blocking (module stays loaded)
-sudo kblockerctl unblock
-
-# remove module entirely
-sudo kblockerctl unload
 ```
 
-## PGP mode
-
-Without PGP, the unload key is readable from `/sys/kernel/kblocker/key`. Anyone with root can retrieve it and disable the blocker. PGP mode encrypts the key to trusted recipients so that:
-
-1. On `enable`, kblockerctl reads the key from sysfs, GPG-encrypts it for all registered public keys, and signals the kernel to zero the key from memory
-2. The `key` sysfs attribute returns `"encrypted"` instead of the raw hex
-3. `unblock` and `unload` require the decrypted key (PGP-decrypt the ciphertext, write the plain hex to the kernel)
+**4. Ending early takes your key holder**
 
 ```sh
-# register a PGP public key
-sudo kblockerctl add-pgp alice.pub
-
-# enable with PGP protection
-sudo kblockerctl enable 60
-
-# disable (needs PGP private key to decrypt)
-sudo kblockerctl unblock
-
-# unload (needs the key too)
-sudo kblockerctl unload
+sudo kblockerctl unblock      # asks for the key they decrypted for you
 ```
 
-### Web UI: Browser-based PGP key management
+Or send them `http://<your-machine>:8737/unblock` and they can decrypt it in their browser. Either way, the block also ends by itself when the time is up.
 
-Generate PGP keys entirely in your browser (using OpenPGP.js). The private key never touches the server:
+> 💡 **Just want to look around?** `cd gui && pnpm install && pnpm dev` runs the desktop app's UI in a browser with demo data, no kernel module needed.
+
+## ✨ Features
+
+### 🧱 Blocking
+
+- Hooks `NF_INET_LOCAL_OUT` and `NF_INET_FORWARD`, so it covers this machine and anything it routes.
+- Matches the TLS SNI, including the outer SNI of ECH hellos, against your list; domains are also null-routed via `/etc/hosts`.
+- A rule covers the domain and every subdomain: `x.com` blocks `www.x.com`, not `netflix.com`.
+- Block IPv4 and IPv6 addresses directly with `block-ip`.
+
+### 🔐 Locking
+
+- PGP mode encrypts the unload key to every registered key holder, then zeroes it in the kernel. Any one of them can unlock.
+- Locked blocks are written to `/var/lib/kblocker/state` by the kernel and restored, still locked, after a reboot. Time spent powered off doesn't count.
+- `--insecure` skips PGP and prints the key, for testing.
+
+### 🗓️ Schedule and history
+
+- Weekly windows in `/etc/kblocker/schedule.json`, started by `kblocker-scheduler.service` as PGP-locked blocks.
+- Unlocking a scheduled block early lifts it until the next window. The schedule can't be edited mid-block.
+- Every block is recorded in `/var/lib/kblocker/history.jsonl`; `kblockerctl history` sums it up.
+
+### 🌐 Key holder pages
+
+- The scheduler service hosts `/keys` (create and register a key) and `/unblock` (decrypt the unload key) on port 8737.
+- Choose who can reach them: `off`, `local`, `lan` or `custom --bind <ip>` (a VPN address, say).
+- OpenPGP.js is built into `kblockerctl`, not loaded from a CDN, and the pages only accept same-origin requests.
+
+### 🖥️ Desktop app
+
+- A Tauri app covering status, starting blocks, the schedule, history, sites, key holders and unlocking.
+- Changes go through `pkexec kblockerctl` with the polkit policy `make install` puts in place. Scheduling and history keep working with the app closed.
+
+## ⌨️ Commands at a glance
 
 ```sh
-# start web UI for key generation
-sudo kblockerctl add-pgp-web
-# Opens on http://127.0.0.1:<random-port>
+sudo kblockerctl enable <minutes>     # start a block
+sudo kblockerctl status               # what's blocked and for how long
+sudo kblockerctl unblock              # end it (needs the key)
+sudo kblockerctl add <domain>         # add a site
+sudo kblockerctl add-pgp <key.asc>    # add a key holder
+sudo kblockerctl schedule set <file>  # set the weekly schedule
+sudo kblockerctl history              # past blocks
+sudo kblockerctl unload               # remove the module (needs the key)
 ```
 
-The unblock-web UI lets you decrypt the PGP ciphertext client-side in the browser and submit the key:
+The full list is in [docs/commands.md](docs/commands.md).
 
-```sh
-sudo kblockerctl unblock-web
-# Opens on http://127.0.0.1:<random-port>
-```
-
-### Surviving a reboot
-
-PGP-protected sessions are persisted to `/var/lib/kblocker/state` and restored
-when the module loads again. A restored session is always re-armed with PGP
-protection inside the kernel — the key stays erased from memory and `disable`
-still requires the key, so rebooting does not weaken the block. The block
-clears itself when the timer expires, key or not. Insecure (`--insecure`)
-sessions are never persisted and do not survive a reboot.
-
-### Insecure mode
-
-Without any key registered, `--insecure` mode prints the key to stdout instead:
-
-```sh
-sudo kblockerctl enable 60 --insecure
-```
-
-## Scheduled blocks
-
-`kblockerctl schedule set` stores a weekly schedule in `/etc/kblocker/schedule.json`,
-and `kblocker-scheduler.service` (installed and enabled by `make install`) starts a
-PGP-locked block whenever a window opens, lasting until the window closes:
-
-```json
-{ "blocks": [
-  { "id": "am", "name": "Morning focus", "days": [1,2,3,4,5], "start": "09:00", "end": "12:00", "enabled": true },
-  { "id": "pm", "name": "Afternoon focus", "days": [1,2,3,4,5], "start": "13:00", "end": "17:00", "enabled": true }
-] }
-```
-
-Days are numbered from Sunday (0) to Saturday (6); an end at or before the start runs
-past midnight. Each window is started once: unlocking it early with the key lifts it
-until the next window. The schedule can't be changed while a block is running. Scheduled
-blocks need at least one registered PGP key.
-
-The same service records every block, however it was started, in
-`/var/lib/kblocker/history.jsonl`; `kblockerctl history` summarizes it. It also hosts
-the key holder pages on `http://127.0.0.1:8737` (`/keys` to create and register a key,
-`/unblock` to decrypt the unload key in the browser and end a block).
-`sudo kblockerctl web-pages lan` opens them to other devices on your network,
-`local` limits them to this computer again, `custom --bind <ip>` listens on one
-address you choose (a VPN address, say) and `off` turns them off. Add `--port <port>`
-to any of them to move the pages; otherwise the port is kept. The setting is saved in
-a drop-in for the service, and `add-pgp-web` / `unblock-web` use the same address by
-default. All of it is also on the desktop app's Key holders and System pages. The pages only accept same-origin
-requests, and OpenPGP.js is built into `kblockerctl` rather than loaded from a CDN.
-
-## Desktop app
-
-`gui/` is a Tauri app (Astro + Svelte + Tailwind) covering status, starting blocks, the
-weekly schedule, history, sites, key holders and unlocking. It reads state directly and
-makes changes through `pkexec kblockerctl`, using the polkit policy that `make install`
-puts in place. Scheduled blocks and history don't depend on it: the scheduler service
-handles both.
-
-```sh
-cd gui
-pnpm install
-pnpm tauri dev      # run against the installed kblockerctl
-pnpm dev            # UI only, in a browser, with sample data
-pnpm tauri build    # .deb and AppImage in src-tauri/target/release/bundle
-```
-
-Linux builds need `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev`.
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `enable <minutes> [--insecure]` | Enable blocking. Requires PGP unless `--insecure` |
-| `disable` / `unblock [--key <hex>]` | Disable blocking. Needs PGP key when PGP mode is active |
-| `unload [--key <hex>]` | Permanently remove the module. Needs the unblock key |
-| `status` | Show blocking state, remaining time, protected files |
-| `block <domain>...` | Write domains to kernel and config file (does not enable) |
-| `add <domain>` | Add a domain to the persistent config |
-| `remove <domain>` | Remove a domain |
-| `reload` | Re-write domains to kernel, refresh PGP ciphertexts |
-| `block-ip <ip>...` | Set blocked IPs directly (replaces existing list) |
-| `list` | Show blocked IPs and configured domains |
-| `key` | Show the current unload key and PGP key fingerprints |
-| `add-pgp <pubkey.asc> [name]` | Register a PGP public key |
-| `remove-pgp <fingerprint>` | Remove a registered PGP key |
-| `list-pgp` | List registered PGP keys |
-| `pgp-cipher <fingerprint>` | Print the PGP-encrypted unload key for a recipient |
-| `add-pgp-web [--port <port>] [--bind <ip>]` | Start web UI for browser-based PGP key generation |
-| `unblock-web [--port <port>] [--bind <ip>]` | Start web UI to decrypt and submit unblock key via browser |
-| `schedule [--json]` | Show scheduled blocks |
-| `schedule set <file \| ->` | Replace the weekly schedule (not while blocking) |
-| `schedule clear` | Remove all scheduled blocks |
-| `schedule-daemon` | Start scheduled blocks, record history and host the key holder pages (run by `kblocker-scheduler.service`) |
-| `web-pages [off \| local \| lan \| custom --bind <ip>] [--port <port>]` | Show or set where the scheduler service hosts the key holder pages |
-| `history [--json]` | Show past blocks and time spent blocking |
-| `crash` | Force-remove module (triggers kernel panic) |
-
-## Architecture
+## 🏗️ How it fits together
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    Userspace                             │
-│                                                          │
-│  kblockerctl                                             │
-│      │ writes                                            │
-│      ▼                                                   │
-│  /sys/kernel/kblocker/{enabled,blocked_ips,              │
-│                        blocked_domains,unblock,          │
-│                        disable,pgp_active,...}            │
-│                                                          │
-│  PGP keys: /etc/kblocker/keys/                           │
-│  Ciphertexts: /var/lib/kblocker/unlock-pgp/              │
-│  Persisted state: /var/lib/kblocker/state (kernel-owned) │
-│  Domain config: /etc/kblocker/domains.conf               │
-│                                                          │
-│  Web UIs: add-pgp-web (key gen)                          │
-│           unblock-web (browser PGP decrypt)              │
-└──────────────────────┬───────────────────────────────────┘
-                       │ sysfs
-┌──────────────────────▼───────────────────────────────────┐
-│                    Kernel                                │
-│                                                          │
-│  netfilter hooks (LOCAL_OUT, FORWARD)                    │
-│    ├─ IPv4/IPv6 IP blacklist check                       │
-│    ├─ TLS SNI inspection (domain blacklist)              │
-│    ├─ outer SNI matched for ECH (0xFE0D) hellos          │
-│    └─ UDP/443 (QUIC) drop to force TCP fallback          │
-│                                                          │
-│  File protection (inode_operations override + immut)     │
-│    ├─ kblocker.ko                                        │
-│    ├─ /etc/modules-load.d/kblocker.conf                  │
-│    ├─ /etc/hosts                                         │
-│    └─ /var/lib/kblocker/state (append-only)              │
-│                                                          │
-│  Key management                                          │
-│    ├─ 128-bit random key at module init                  │
-│    ├─ SHA-256 hash stored for verification               │
-│    ├─ PGP mode: key zeroed on pgp_active=1               │
-│    └─ disable: regenerates key + clears pgp_active       │
-│                                                          │
-│  Timer: auto-disable on expiry (boottime, checks 1s)     │
-│  State: remaining time appended every 60s, restored at   │
-│         module load only                                 │
-│  Workqueue: file protection re-check (every 1s)          │
-└──────────────────────────────────────────────────────────┘
+ Desktop app (Tauri) ──pkexec──┐
+                               ▼
+ kblocker-scheduler.service ─► kblockerctl ──sysfs──► kblocker.ko (kernel)
+   ├─ starts scheduled blocks                           ├─ netfilter: SNI / IP / QUIC drop
+   ├─ records history                                   ├─ key: SHA-256 check, zeroed under PGP
+   └─ key holder pages :8737                            ├─ file protection, re-checked every 1s
+        ▲                                               └─ boot-time timer + persisted state
+        └── key holder's browser (OpenPGP.js)
 ```
 
-## Build
+## 📚 Documentation
 
-```sh
-make
-```
+| | |
+|---|---|
+| ⌨️ [Command reference](docs/commands.md) | Every command, PGP mode, reboots, insecure mode, the schedule format and key holder pages |
+| 🏗️ [Architecture](docs/architecture.md) | Kernel and userspace layout, sysfs interface, file protection, key lifecycle |
+| 🧪 [Development and tests](docs/development.md) | Building, the desktop app, `.deb` packaging, integration tests, syzkaller fuzzing, property tests |
 
-Requires kernel headers (`linux-headers-$(uname -r)`) and Go 1.21+.
+## ⚠️ Status
 
-## Install / Uninstall
+kblocker is a kernel module that guards its own files, so try it in a VM before trusting it on your daily machine. Unloading needs the key even when no block is running; a locked block always ends by itself when its time is up. The module is fuzzed with syzkaller under KASAN, KCSAN and lockdep, and its parsers have property tests under ASan and UBSan.
 
-```sh
-# install
-sudo ./install
+## 📄 License
 
-# uninstall
-sudo ./uninstall
-```
-
-Or via the deb package: `./build-deb.sh` produces a `.deb` in `build/`.
-
-## Testing
-
-```sh
-sudo ./test.sh
-```
-
-Runs integration tests against the live kernel module via sysfs.
-
-### Fuzzing
-
-`cmd/fuzz` is a quick black-box fuzzer for the sysfs interface on the host.
-For coverage-guided fuzzing of the whole module (sysfs, the TLS/SNI parser via
-real traffic, and the file-protection hooks) under KASAN and lockdep in
-throwaway VMs, see [fuzz/syzkaller](fuzz/syzkaller/README.md):
-
-```sh
-make syz-setup && make syz-run
-```
-
-A second setup swaps KASAN for KCSAN and runs several processes per VM to
-find data races:
-
-```sh
-make syz-setup-kcsan && make syz-run-kcsan
-```
-
-The fuzzing build is compiled with `KBLOCKER_DEBUG=1`, which checks the
-session invariants after every state change (enabled exactly when the module
-holds its own reference, no protected files or state file while disabled, no
-raw key in memory during a PGP session, a restored session is always
-PGP-locked, list sizes in bounds, stored domains normalized). A violation is
-a `WARN`, which syzkaller reports as a crash with a reproducer.
-
-### Property tests
-
-The parsing code (`src/parse.c`: SNI extraction, domain matching and
-normalization, key and state-file parsing, the hosts-file block) is plain C
-shared with a userspace build. `make proptest` runs Hypothesis property tests
-of it under AddressSanitizer and UBSan, comparing each function with a short
-Python model:
-
-```sh
-make proptest
-KB_PROPTEST_EXAMPLES=100000 tests/proptest/run.sh   # longer soak
-```
+[Apache License 2.0](LICENSE)
