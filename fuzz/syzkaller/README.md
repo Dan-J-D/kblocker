@@ -47,6 +47,27 @@ other's setup (a session started by one makes `pgp_active` read-only for
 another), which makes coverage flaky, keeps such paths out of the corpus
 and makes crashes hard to reproduce. Use more VMs (`VMS`) for throughput.
 
+## Data races (KCSAN)
+
+KASAN only notices a race once it corrupts memory, and lockdep checks lock
+ordering, not unprotected accesses. A second setup, `SANITIZER=kcsan`,
+builds a kernel with [KCSAN](https://docs.kernel.org/dev-tools/kcsan.html)
+instead of KASAN (the two cannot be combined) and reports `KCSAN: data-race
+in ...` whenever two CPUs access the same memory concurrently without
+synchronization and at least one access writes. The out-of-tree module is
+instrumented as well. The interrupt watcher is on, so races between the
+netfilter hooks (softirq) and the sysfs and file-protection paths are seen.
+
+Races need concurrency, so this setup runs 4 processes per VM (`PROCS`)
+despite the coverage flakiness described above. It has its own kernel
+(`linux-kcsan`), module build, image copy (`trixie-kcsan.img`), corpus
+(`workdir-kcsan`) and dashboard port (56742), so it can run next to the
+KASAN setup without disturbing that corpus. The syzkaller build and the
+base image are shared.
+
+KCSAN also reports races in the core kernel that have nothing to do with
+kblocker. Look for reports where a stack goes through kblocker's code.
+
 `KBLOCKER_DEBUG` also checks kblocker's session invariants each time
 `kb_lock` is released (`kb_check_invariants()` in `src/state.c`). A violated
 invariant is a `WARN`, so logic bugs show up as crashes even when nothing
@@ -66,6 +87,9 @@ faults.
 ```sh
 make syz-setup     # = fuzz/syzkaller/setup.sh all
 make syz-run       # starts syz-manager; dashboard on http://127.0.0.1:56741
+
+make syz-setup-kcsan   # = SANITIZER=kcsan fuzz/syzkaller/setup.sh all
+make syz-run-kcsan     # dashboard on http://127.0.0.1:56742
 ```
 
 Stages can be run individually: `fuzz/syzkaller/setup.sh syzkaller|kernel|
@@ -74,9 +98,12 @@ module|image|config|run`. After changing the module, rerun `module` and
 
 Environment variables: `SYZ_WORK` (work directory, default
 `fuzz/syzkaller/work`), `KERNEL_REF` (stable tag to fuzz, default `v7.0.14`),
-`SYZ_COMMIT` (syzkaller commit), `VMS` (number of VMs, default 4).
+`SYZ_COMMIT` (syzkaller commit), `VMS` (number of VMs, default 4),
+`SANITIZER` (`kasan` or `kcsan`, default `kasan`), `PROCS` (processes per
+VM, default 1 for KASAN and 4 for KCSAN).
 
-Findings appear on the dashboard and under `$SYZ_WORK/workdir/crashes/`.
+Findings appear on the dashboard and under `$SYZ_WORK/workdir/crashes/`
+(`workdir-kcsan/crashes/` for KCSAN).
 
 ## Updating the descriptions
 

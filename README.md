@@ -204,6 +204,13 @@ throwaway VMs, see [fuzz/syzkaller](fuzz/syzkaller/README.md):
 make syz-setup && make syz-run
 ```
 
+A second setup swaps KASAN for KCSAN and runs several processes per VM to
+find data races:
+
+```sh
+make syz-setup-kcsan && make syz-run-kcsan
+```
+
 The fuzzing build is compiled with `KBLOCKER_DEBUG=1`, which checks the
 session invariants after every state change (enabled exactly when the module
 holds its own reference, no protected files or state file while disabled, no

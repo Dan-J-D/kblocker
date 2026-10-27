@@ -149,6 +149,13 @@ syz-setup:
 syz-run:
 	fuzz/syzkaller/setup.sh run
 
+# Same, with a KCSAN (data race) kernel instead of KASAN
+syz-setup-kcsan:
+	SANITIZER=kcsan fuzz/syzkaller/setup.sh all
+
+syz-run-kcsan:
+	SANITIZER=kcsan fuzz/syzkaller/setup.sh run
+
 test:
 	@echo "Running integration tests (requires root)..."
 	@if [ "$(shell id -u)" -ne 0 ]; then \
@@ -161,4 +168,4 @@ test:
 %:
 	@:
 
-.PHONY: all clean install uninstall test kblockerctl proptest syz-setup syz-run
+.PHONY: all clean install uninstall test kblockerctl proptest syz-setup syz-run syz-setup-kcsan syz-run-kcsan
