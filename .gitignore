@@ -2,7 +2,7 @@
 .claudeignore
 
 kfuzz
-kblockerctl
+/kblockerctl
 *.ko
 *.o
 *.cmd
@@ -15,3 +15,4 @@ cmd/kblockerctl/go.mod
 debian/kblocker/
 recipients/keys/
 build/
+/target/

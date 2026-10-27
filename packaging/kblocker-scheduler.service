@@ -1,0 +1,15 @@
+[Unit]
+Description=kblocker scheduled blocks, history and key holder pages
+After=systemd-modules-load.service time-sync.target
+
+[Service]
+# Also hosts the key holder pages (/keys, /unblock). To reach them from
+# other devices, override with a drop-in: KBLOCKER_WEB=0.0.0.0:8737, or
+# KBLOCKER_WEB=off to turn them off.
+Environment=KBLOCKER_WEB=127.0.0.1:8737
+ExecStart=/usr/local/bin/kblockerctl schedule-daemon
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
