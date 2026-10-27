@@ -55,9 +55,16 @@ kblocker_state_pgp {
 	nl	const[0xa, int8]
 } [packed]
 
+# Decimal values as strings: fmt[dec] is written with sprintf, whose NUL
+# terminator would overwrite the record's newline and end the kernel's
+# string parsing there. Values that parse stay at or below 120 seconds;
+# overflowing ones must be rejected.
+kblocker_state_seconds = "0", "1", "2", "5", "30", "120", "00000000000000000030", "18446744073709551616", "99999999999999999999999", "-1", "+5", "5 ", "0x10", ""
+kblocker_state_expiry_values = "0", "1", "1600000000", "0001", "18446744073709551616", "-1", ""
+
 kblocker_state_remaining {
 	tag	stringnoz["remaining:"]
-	val	fmt[dec, int64[0:120]]
+	val	stringnoz[kblocker_state_seconds]
 	nl	const[0xa, int8]
 } [packed]
 
@@ -91,7 +98,7 @@ kblocker_state_ip {
 
 kblocker_state_expiry {
 	tag	stringnoz["expiry:"]
-	val	fmt[dec, int64[0:1700000000]]
+	val	stringnoz[kblocker_state_expiry_values]
 	nl	const[0xa, int8]
 } [packed]
 
