@@ -14,6 +14,13 @@
 #   VMS          number of fuzzing VMs (default: 4)
 set -euo pipefail
 
+if [[ $EUID -eq 0 ]]; then
+	# sudo would also drop SYZ_WORK and leave root-owned files that
+	# syz-manager cannot read; the stages that need root call sudo themselves.
+	echo "run $0 as your normal user, not with sudo" >&2
+	exit 1
+fi
+
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 WORK=${SYZ_WORK:-$HERE/work}
