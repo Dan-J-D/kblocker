@@ -134,7 +134,10 @@ stage_image() {
 
 	mnt=$(mktemp -d)
 	sudo mount -o loop "$IMAGE" "$mnt"
-	trap 'sudo umount "$mnt"; rmdir "$mnt"' RETURN
+	# EXIT, not RETURN: set -e exits without returning. A mount left behind
+	# keeps writing to the image, and syz-manager exits when the image changes.
+	IMAGE_MNT=$mnt
+	trap unmount_image EXIT
 	sudo install -D -m 644 "$MODULE/kblocker.ko" "$mnt/lib/modules/$rel/extra/kblocker.ko"
 	sudo depmod -b "$mnt" "$rel"
 	echo kblocker | sudo tee "$mnt/etc/modules-load.d/kblocker.conf" >/dev/null
@@ -157,7 +160,18 @@ stage_image() {
 		printf '127.0.0.1\tlocalhost\n127.0.1.1\tsyzkaller\n::1\tlocalhost ip6-localhost ip6-loopback\n' |
 			sudo tee "$mnt/etc/hosts" >/dev/null
 	fi
+	unmount_image
 	echo "installed kblocker.ko for $rel into $IMAGE"
+}
+
+unmount_image() {
+	[[ -n ${IMAGE_MNT:-} ]] || return 0
+	if ! sudo umount "$IMAGE_MNT"; then
+		echo "failed to unmount $IMAGE_MNT; unmount it before fuzzing" >&2
+		return 1
+	fi
+	rmdir "$IMAGE_MNT"
+	IMAGE_MNT=
 }
 
 stage_config() {
