@@ -40,3 +40,9 @@ KCSAN: data-race in _find_first_bit\+
 # SCSI budget: scsi_device_busy() counts the busy sbitmap locklessly while a
 # completing command releases its slot atomically; the count is a hint
 KCSAN: data-race in (__bitmap_weight|scsi_device_unbusy) / (__bitmap_weight|scsi_device_unbusy)
+# taskstats on exit sums the thread group's delay-accounting counters while
+# they are still being updated; statistics only
+KCSAN: data-race in delayacct_add_tsk\+
+# load balancing tests PF_KTHREAD while an exiting task sets PF_NOFREEZE in
+# the same flags word; the tested bit does not change
+KCSAN: data-race in kthread_is_per_cpu\+
