@@ -52,3 +52,9 @@ KCSAN: data-race in (mas_topiary_replace|mtree_range_walk) / (mas_topiary_replac
 # VFS sums the per-CPU nr_inodes counters locklessly for a writeback
 # estimate while other CPUs update theirs; approximate by design
 KCSAN: data-race in get_nr_inodes\+
+# reaping a task reads its cputime counters for the parent's statistics
+# while they are still being updated
+KCSAN: data-race in release_task\+
+# connect() and sendto() racing on the same IPv6 UDP socket: sendmsg reads
+# sk_v6_daddr without the socket lock (the program races with itself)
+KCSAN: data-race in (__ip6_datagram_connect|udpv6_sendmsg) / (__ip6_datagram_connect|udpv6_sendmsg)
