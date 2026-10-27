@@ -37,3 +37,6 @@ KCSAN: data-race in wq_worker_running\+
 # nohz idle balancing scans the idle-CPU mask locklessly; a stale bit only
 # skips or wastes one balance pass. kblocker uses no bitmap search helpers
 KCSAN: data-race in _find_first_bit\+
+# SCSI budget: scsi_device_busy() counts the busy sbitmap locklessly while a
+# completing command releases its slot atomically; the count is a hint
+KCSAN: data-race in (__bitmap_weight|scsi_device_unbusy) / (__bitmap_weight|scsi_device_unbusy)
