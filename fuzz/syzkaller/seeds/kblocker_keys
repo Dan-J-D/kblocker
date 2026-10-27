@@ -1,0 +1,18 @@
+# With fixed_key=1: authorized disable of a PGP session, authorized unblock,
+# and disabling a restored session saved with the fixed key's hash
+r0 = openat$kblocker_pgp(0xffffffffffffff9c, &(0x7f0000000000)='/sys/kernel/kblocker/pgp_active\x00', 0x2, 0x0)
+write$kblocker_pgp(r0, &(0x7f0000000100)={'1', []}, 0x1)
+r1 = openat$kblocker_enabled(0xffffffffffffff9c, &(0x7f0000000200)='/sys/kernel/kblocker/enabled\x00', 0x2, 0x0)
+write$kblocker_enabled(r1, &(0x7f0000000300)={'5', []}, 0x1)
+r2 = openat$kblocker_key(0xffffffffffffff9c, &(0x7f0000000400)='/sys/kernel/kblocker/disable\x00', 0x1, 0x0)
+write$kblocker_key_fixed(r2, &(0x7f0000000500)={'000102030405060708090a0b0c0d0e0f', [0xa]}, 0x21)
+write$kblocker_enabled(r1, &(0x7f0000000600)={'5', []}, 0x1)
+r3 = openat$kblocker_key(0xffffffffffffff9c, &(0x7f0000000700)='/sys/kernel/kblocker/unblock\x00', 0x1, 0x0)
+write$kblocker_key_fixed(r3, &(0x7f0000000800)={'000102030405060708090a0b0c0d0e0f', []}, 0x20)
+r4 = openat$kblocker_state(0xffffffffffffff9c, &(0x7f0000000900)='/dev/kblocker-state\x00', 0x2, 0x0)
+write$kblocker_state(r4, &(0x7f0000000a00)=[@fixed_hash={'key_hash:', 'be45cb2605bf36bebde684841a28f0fd43c69850a3dce5fedba69928ee3a8991', 0xa}, @remaining={'remaining:', '120', 0xa}], 0x5a)
+r5 = openat$kblocker_restore(0xffffffffffffff9c, &(0x7f0000000b00)='/sys/kernel/kblocker/debug_restore\x00', 0x1, 0x0)
+write$kblocker_restore(r5, &(0x7f0000000c00)='1\x00', 0x2)
+write$kblocker_key_fixed(r2, &(0x7f0000000d00)={'000102030405060708090a0b0c0d0e0f', [0xa]}, 0x21)
+r6 = openat$kblocker_ro(0xffffffffffffff9c, &(0x7f0000000e00)='/sys/kernel/kblocker/status\x00', 0x0, 0x0)
+read$kblocker(r6, &(0x7f0000000f00)=""/256, 0x100)

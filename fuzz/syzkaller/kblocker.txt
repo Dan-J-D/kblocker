@@ -41,6 +41,7 @@ write$kblocker_state_raw(fd fd_kblocker_state, buf buffer[in], len bytesize[buf]
 kblocker_state_line [
 	remaining	kblocker_state_remaining
 	key_hash	kblocker_state_key_hash
+	fixed_hash	kblocker_state_fixed_hash
 	pgp		kblocker_state_pgp
 	domains		kblocker_state_domains
 	ips		kblocker_state_ips
@@ -72,6 +73,13 @@ kblocker_state_remaining {
 kblocker_state_key_hash {
 	tag	stringnoz["key_hash:"]
 	digits	array[flags[kblocker_hex_digits, int8], 62:66]
+	nl	const[0xa, int8]
+} [packed]
+
+# SHA-256 of the fixed_key key: a restored session the fuzzer can unlock
+kblocker_state_fixed_hash {
+	tag	stringnoz["key_hash:"]
+	digits	stringnoz["be45cb2605bf36bebde684841a28f0fd43c69850a3dce5fedba69928ee3a8991"]
 	nl	const[0xa, int8]
 } [packed]
 
@@ -153,6 +161,15 @@ kblocker_bools = "0", "1", "y", "n", "true", "on", "2", ""
 
 write$kblocker_key(fd fd_kblocker_key, buf ptr[in, kblocker_hex_key], len bytesize[buf])
 write$kblocker_key_raw(fd fd_kblocker_key, buf buffer[in], len bytesize[buf])
+
+# The module is loaded with fixed_key=1 (debug builds only), so this is the
+# real key and reaches the authorized disable and unload paths.
+write$kblocker_key_fixed(fd fd_kblocker_key, buf ptr[in, kblocker_fixed_key], len bytesize[buf])
+
+kblocker_fixed_key {
+	digits	stringnoz["000102030405060708090a0b0c0d0e0f"]
+	nl	array[const[0xa, int8], 0:1]
+} [packed]
 
 kblocker_hex_key {
 	digits	array[flags[kblocker_hex_digits, int8], 32]

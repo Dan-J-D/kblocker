@@ -1,4 +1,5 @@
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/sysfs.h>
 #include <linux/slab.h>
 #include <linux/random.h>
@@ -14,10 +15,29 @@ bool ct_memcmp_eq(const u8 *a, const u8 *b, size_t size)
 	return diff == 0;
 }
 
+#ifdef KBLOCKER_DEBUG
+/*
+ * Keys are 00 01 02 ... 0f, so a fuzzer, which cannot carry what it reads
+ * from the key attribute into a later write, can still present the right
+ * key and reach the authorized disable and unload paths.
+ */
+static bool fixed_key;
+module_param(fixed_key, bool, 0444);
+MODULE_PARM_DESC(fixed_key, "Use a constant key (debug builds only)");
+#endif
+
 /* Caller holds kb_lock (or is module init) */
 void generate_unload_key(void)
 {
-	get_random_bytes(unload_key, sizeof(unload_key));
+#ifdef KBLOCKER_DEBUG
+	if (fixed_key) {
+		int i;
+
+		for (i = 0; i < sizeof(unload_key); i++)
+			unload_key[i] = i;
+	} else
+#endif
+		get_random_bytes(unload_key, sizeof(unload_key));
 	sha256(unload_key, sizeof(unload_key), key_hash);
 }
 

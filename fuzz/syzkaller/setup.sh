@@ -117,7 +117,9 @@ stage_image() {
 		f /dev/kblocker-modules.conf 0644 root root - kblocker\n
 		f /dev/kblocker-state 0600 root root -
 	EOF
-	echo "options kblocker hook_all_netns=1 hosts_file=/dev/kblocker-hosts" \
+	# fixed_key=1: a constant key the descriptions know, so authorized
+	# disables and unloads are reachable
+	echo "options kblocker hook_all_netns=1 fixed_key=1 hosts_file=/dev/kblocker-hosts" \
 		"state_file=/dev/kblocker-state modconf_file=/dev/kblocker-modules.conf" |
 		sudo tee "$mnt/etc/modprobe.d/kblocker.conf" >/dev/null
 	sudo mkdir -p "$mnt/var/lib/kblocker"

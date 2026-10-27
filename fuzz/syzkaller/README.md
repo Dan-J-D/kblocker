@@ -34,7 +34,11 @@ The module is built with `KBLOCKER_DEBUG=1` and loaded in the VM with:
   `modconf_file=/dev/kblocker-modules.conf` (created by a `tmpfiles.d` entry),
   because the executor sandbox only sees `/dev`, `/proc` and `/sys`, so
   protected files under `/etc` and `/var` would be unreachable. These
-  parameters exist only in debug builds.
+  parameters exist only in debug builds;
+- `fixed_key=1` (debug builds only), which makes every key `00 01 02 … 0f`.
+  syzkaller cannot feed what it reads from `key` into a later write, so with
+  random keys the authorized `disable` and `unblock` paths would be
+  unreachable.
 
 `KBLOCKER_DEBUG` also checks kblocker's session invariants each time
 `kb_lock` is released (`kb_check_invariants()` in `src/state.c`). A violated
