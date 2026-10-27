@@ -7,6 +7,7 @@ MSG_FASTOPEN = 536870912
 MS_BIND = 4096
 O_RDONLY = 0
 O_RDWR = 2
+O_WRONLY = 1
 __NR_link = 86
 __NR_mount = 165
 __NR_openat = 257

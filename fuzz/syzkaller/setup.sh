@@ -106,6 +106,11 @@ stage_image() {
 	echo kblocker | sudo tee "$mnt/etc/modules-load.d/kblocker.conf" >/dev/null
 	echo "options kblocker hook_all_netns=1" | sudo tee "$mnt/etc/modprobe.d/kblocker.conf" >/dev/null
 	sudo mkdir -p "$mnt/var/lib/kblocker"
+	# debootstrap images have no /etc/hosts; kblocker rewrites it
+	if ! sudo test -f "$mnt/etc/hosts"; then
+		printf '127.0.0.1\tlocalhost\n127.0.1.1\tsyzkaller\n::1\tlocalhost ip6-localhost ip6-loopback\n' |
+			sudo tee "$mnt/etc/hosts" >/dev/null
+	fi
 	echo "installed kblocker.ko for $rel into $img"
 }
 

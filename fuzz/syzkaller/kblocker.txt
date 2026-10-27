@@ -19,7 +19,7 @@ openat$kblocker_enabled(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kbl
 openat$kblocker_domains(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/blocked_domains"]], flags const[O_RDWR], mode const[0]) fd_kblocker_domains
 openat$kblocker_ips(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/blocked_ips"]], flags const[O_RDWR], mode const[0]) fd_kblocker_ips
 openat$kblocker_pgp(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/pgp_active"]], flags const[O_RDWR], mode const[0]) fd_kblocker_pgp
-openat$kblocker_key(fd const[AT_FDCWD], file ptr[in, string[kblocker_key_files]], flags const[O_RDWR], mode const[0]) fd_kblocker_key
+openat$kblocker_key(fd const[AT_FDCWD], file ptr[in, string[kblocker_key_files]], flags const[O_WRONLY], mode const[0]) fd_kblocker_key
 
 kblocker_ro_files = "/sys/kernel/kblocker/status", "/sys/kernel/kblocker/remaining", "/sys/kernel/kblocker/block_count", "/sys/kernel/kblocker/key", "/sys/kernel/kblocker/enabled", "/sys/kernel/kblocker/blocked_domains", "/sys/kernel/kblocker/blocked_ips", "/sys/kernel/kblocker/pgp_active"
 kblocker_key_files = "/sys/kernel/kblocker/disable", "/sys/kernel/kblocker/unblock"
@@ -192,7 +192,7 @@ rename$kblocker_over(old ptr[in, filename], new ptr[in, string[kblocker_protecte
 link$kblocker(old ptr[in, string[kblocker_protected_paths]], new ptr[in, filename])
 truncate$kblocker(file ptr[in, string[kblocker_protected_paths]], len intptr)
 chmod$kblocker(file ptr[in, string[kblocker_protected_paths]], mode flags[open_mode])
-mount$kblocker_bind(src ptr[in, filename], dst ptr[in, string[kblocker_protected_paths]], type const[0], flags const[MS_BIND], data const[0])
+mount$kblocker_bind(src ptr[in, filename], dst ptr[in, string[kblocker_protected_paths]], type ptr[in, string["pipefs"]], flags const[MS_BIND], data const[0])
 umount2$kblocker(path ptr[in, string[kblocker_protected_paths]], flags flags[umount_flags])
 
 kblocker_protected_paths = "/etc/hosts", "/etc/modules-load.d/kblocker.conf", "/var/lib/kblocker/state"
