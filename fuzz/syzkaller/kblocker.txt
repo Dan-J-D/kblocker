@@ -28,7 +28,8 @@ openat$kblocker_key(fd const[AT_FDCWD], file ptr[in, string[kblocker_key_files]]
 openat$kblocker_restore(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/debug_restore"]], flags const[O_WRONLY], mode const[0]) fd_kblocker_restore
 write$kblocker_restore(fd fd_kblocker_restore, buf ptr[in, string["1"]], len bytesize[buf])
 
-openat$kblocker_state(fd const[AT_FDCWD], file ptr[in, string["/dev/kblocker-state"]], flags flags[open_flags], mode const[0]) fd_kblocker_state
+openat$kblocker_state(fd const[AT_FDCWD], file ptr[in, string["/dev/kblocker-state"]], flags flags[kblocker_state_open_flags], mode const[0]) fd_kblocker_state
+kblocker_state_open_flags = O_WRONLY, O_RDWR, O_TRUNC, O_APPEND
 write$kblocker_state(fd fd_kblocker_state, buf ptr[in, array[kblocker_state_line]], len bytesize[buf])
 write$kblocker_state_raw(fd fd_kblocker_state, buf buffer[in], len bytesize[buf])
 
@@ -39,7 +40,7 @@ write$kblocker_state_raw(fd fd_kblocker_state, buf buffer[in], len bytesize[buf]
 kblocker_state_line [
 	remaining	kblocker_state_remaining
 	key_hash	kblocker_state_key_hash
-	pgp		stringnoz["pgp_active:1\n"]
+	pgp		kblocker_state_pgp
 	domains		kblocker_state_domains
 	ips		kblocker_state_ips
 	expiry		kblocker_state_expiry
@@ -47,7 +48,12 @@ kblocker_state_line [
 	junk		array[int8, 0:16]
 ] [varlen]
 
-kblocker_state_prefixes = "remaining:", "key_hash:", "domains:", "blocked_ips:", "expiry:", "\n"
+kblocker_state_prefixes = "remaining:", "key_hash:", "domains:", "blocked_ips:", "expiry:"
+
+kblocker_state_pgp {
+	tag	stringnoz["pgp_active:1"]
+	nl	const[0xa, int8]
+} [packed]
 
 kblocker_state_remaining {
 	tag	stringnoz["remaining:"]
@@ -96,9 +102,15 @@ read$kblocker(fd fd_kblocker_ro, buf buffer[out], len len[buf])
 
 # Session lengths are kept short so the fuzzer is not locked out of the
 # disabled-only paths for long; out-of-range and malformed values are kept.
-write$kblocker_enabled(fd fd_kblocker_enabled, buf ptr[in, stringnoz[kblocker_seconds]], len bytesize[buf])
+write$kblocker_enabled(fd fd_kblocker_enabled, buf ptr[in, kblocker_seconds_input], len bytesize[buf])
 write$kblocker_enabled_int(fd fd_kblocker_enabled, buf ptr[in, fmt[dec, int8[0:5]]], len bytesize[buf])
-kblocker_seconds = "0", "1", "2", "3", "5", "0\n", "1\n", "2\n", "-1", "0x3", "03", "1 ", "abc", "", "18446744073709551615", "315360001", "99999999999999999999"
+# syzlang strings have no escapes: newlines are added as a separate byte
+kblocker_seconds_input {
+	val	stringnoz[kblocker_seconds]
+	nl	array[const[0xa, int8], 0:1]
+} [packed]
+
+kblocker_seconds = "0", "1", "2", "3", "5", "-1", "0x3", "03", "1 ", "abc", "", "18446744073709551615", "315360001", "99999999999999999999"
 
 write$kblocker_domains(fd fd_kblocker_domains, buf ptr[in, array[kblocker_domain_line]], len bytesize[buf])
 write$kblocker_domains_raw(fd fd_kblocker_domains, buf buffer[in], len bytesize[buf])
@@ -122,8 +134,14 @@ kblocker_ip_line {
 
 kblocker_ip_inputs = "127.0.0.1", "127.0.0.2", "10.0.0.1", "172.20.20.170", "::1", "fe80::aa", "fe88::", "1.2.3", "not-an-ip", "#10.0.0.2", ""
 
-write$kblocker_pgp(fd fd_kblocker_pgp, buf ptr[in, stringnoz[kblocker_bools]], len bytesize[buf])
-kblocker_bools = "0", "1", "0\n", "1\n", "y", "n", "true", "on", "2", ""
+write$kblocker_pgp(fd fd_kblocker_pgp, buf ptr[in, kblocker_bool_input], len bytesize[buf])
+
+kblocker_bool_input {
+	val	stringnoz[kblocker_bools]
+	nl	array[const[0xa, int8], 0:1]
+} [packed]
+
+kblocker_bools = "0", "1", "y", "n", "true", "on", "2", ""
 
 write$kblocker_key(fd fd_kblocker_key, buf ptr[in, kblocker_hex_key], len bytesize[buf])
 write$kblocker_key_raw(fd fd_kblocker_key, buf buffer[in], len bytesize[buf])

@@ -68,5 +68,12 @@ Findings appear on the dashboard and under `$SYZ_WORK/workdir/crashes/`.
 ## Updating the descriptions
 
 Edit `kblocker.txt`; if you use a new constant, add its amd64 value to
-`kblocker.txt.const`. `setup.sh syzkaller` copies both into syzkaller and
+`kblocker.txt.const`. syzlang strings have no escape sequences, so a
+newline must be a separate `const[0xa, int8]` byte.
+
+`seeds/` holds starting programs (a restored session, a PGP session, a
+session with protected-file operations) that random generation reaches
+slowly. `setup.sh syzkaller` copies them to `sys/linux/test`, where
+syz-manager loads them on every start; a seed that no longer parses is
+reported as broken in the manager log. `setup.sh syzkaller` copies both into syzkaller and
 rebuilds, which fails with a precise error if a description is invalid.

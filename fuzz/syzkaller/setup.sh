@@ -49,6 +49,10 @@ stage_syzkaller() {
 		git -C "$WORK/syzkaller" checkout -q FETCH_HEAD
 	fi
 	cp "$HERE/kblocker.txt" "$HERE/kblocker.txt.const" "$WORK/syzkaller/sys/linux/"
+	# syz-manager starts from every program in sys/linux/test; these reach
+	# deep states (a restored session, a PGP session) that random
+	# generation finds slowly
+	cp "$HERE"/seeds/kblocker_* "$WORK/syzkaller/sys/linux/test/"
 	# syzkaller pins a newer Go than distros ship; let go fetch it
 	GOTOOLCHAIN=auto make -C "$WORK/syzkaller" -j"$JOBS"
 }

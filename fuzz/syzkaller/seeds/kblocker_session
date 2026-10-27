@@ -1,0 +1,13 @@
+# Block domains and IPs, start a short session, then poke the protected files
+r0 = openat$kblocker_domains(0xffffffffffffff9c, &(0x7f0000000000)='/sys/kernel/kblocker/blocked_domains\x00', 0x2, 0x0)
+write$kblocker_domains(r0, &(0x7f0000000100)=[{'youtube.com', 0xa}, {'*.reddit.com', 0xa}], 0x19)
+r1 = openat$kblocker_ips(0xffffffffffffff9c, &(0x7f0000000200)='/sys/kernel/kblocker/blocked_ips\x00', 0x2, 0x0)
+write$kblocker_ips(r1, &(0x7f0000000300)=[{'127.0.0.2', 0xa}, {'fe80::aa', 0xa}], 0x13)
+r2 = openat$kblocker_enabled(0xffffffffffffff9c, &(0x7f0000000400)='/sys/kernel/kblocker/enabled\x00', 0x2, 0x0)
+write$kblocker_enabled(r2, &(0x7f0000000500)={'5', [0xa]}, 0x2)
+r3 = openat$kblocker_state(0xffffffffffffff9c, &(0x7f0000000600)='/dev/kblocker-state\x00', 0x2, 0x0)
+write$kblocker_state_raw(r3, &(0x7f0000000700)="72656d61696e696e673a310a", 0xc)
+truncate$kblocker(&(0x7f0000000800)='/dev/kblocker-hosts\x00', 0x0)
+unlink$kblocker(&(0x7f0000000900)='/dev/kblocker-modules.conf\x00')
+r4 = openat$kblocker_ro(0xffffffffffffff9c, &(0x7f0000000a00)='/sys/kernel/kblocker/blocked_domains\x00', 0x0, 0x0)
+read$kblocker(r4, &(0x7f0000000b00)=""/256, 0x100)

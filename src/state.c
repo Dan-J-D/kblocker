@@ -469,7 +469,8 @@ out:
 
 /*
  * Called once from module init, under kb_lock. This is the only way a
- * session can be restored; there is no sysfs interface for it.
+ * session can be restored; release builds have no sysfs interface for it
+ * (KBLOCKER_DEBUG builds add debug_restore for fuzzing).
  */
 void try_restore_state_from_disk(void)
 {
