@@ -23,11 +23,13 @@ openat$kblocker_ips(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocke
 openat$kblocker_pgp(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/pgp_active"]], flags const[O_RDWR], mode const[0]) fd_kblocker_pgp
 openat$kblocker_key(fd const[AT_FDCWD], file ptr[in, string[kblocker_key_files]], flags const[O_WRONLY], mode const[0]) fd_kblocker_key
 
-# KBLOCKER_DEBUG only: simulate a reboot (drop the in-memory session, keep
-# the files) and run boot-time recovery from the state file, which the
-# fuzzer can rewrite while no session is active.
+# KBLOCKER_DEBUG only: "1" simulates a reboot (drop the in-memory session,
+# keep the files) and runs boot-time recovery from the state file, which the
+# fuzzer can rewrite while no session is active; "0" is a clean boot that
+# resets everything, since state otherwise carries over between programs.
 openat$kblocker_restore(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/debug_restore"]], flags const[O_WRONLY], mode const[0]) fd_kblocker_restore
-write$kblocker_restore(fd fd_kblocker_restore, buf ptr[in, string["1"]], len bytesize[buf])
+write$kblocker_restore(fd fd_kblocker_restore, buf ptr[in, string[kblocker_reboot_modes]], len bytesize[buf])
+kblocker_reboot_modes = "0", "1"
 
 openat$kblocker_state(fd const[AT_FDCWD], file ptr[in, string["/dev/kblocker-state"]], flags flags[kblocker_state_open_flags], mode const[0]) fd_kblocker_state
 kblocker_state_open_flags = O_WRONLY, O_RDWR, O_TRUNC, O_APPEND

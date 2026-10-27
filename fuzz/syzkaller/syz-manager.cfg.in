@@ -7,7 +7,7 @@
 	"image": "@WORK@/image/trixie.img",
 	"sshkey": "@WORK@/image/trixie.id_rsa",
 	"syzkaller": "@WORK@/syzkaller",
-	"procs": 4,
+	"procs": 1,
 	"sandbox": "none",
 	"type": "qemu",
 	"vm": {

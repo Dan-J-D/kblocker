@@ -84,7 +84,7 @@ void disable_blocking(void);
 u64 remaining_seconds(void);
 void try_restore_state_from_disk(void);
 #ifdef KBLOCKER_DEBUG
-void kb_debug_reboot(void);
+void kb_debug_reboot(bool recover);
 #endif
 void state_file_clear(void);
 

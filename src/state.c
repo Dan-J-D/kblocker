@@ -470,15 +470,22 @@ out:
 #ifdef KBLOCKER_DEBUG
 /*
  * Simulate a reboot for the fuzzer: everything held in memory is lost
- * (the session, its key, the hooks, the block lists) while the files stay
- * as they are, then recovery runs as at module init. Caller holds kb_lock.
+ * (the session, its key, the hooks, the block lists) and recovery runs as
+ * at module init. With @recover false it is a clean first boot instead:
+ * the hosts block and state file are cleared and nothing is recovered,
+ * which also gets the fuzzer out of sessions it cannot end.
+ * Caller holds kb_lock.
  */
-void kb_debug_reboot(void)
+void kb_debug_reboot(bool recover)
 {
 	if (enabled) {
 		stop_session();
 		protection_disable();
 		state_file_close();
+	}
+	if (!recover) {
+		clear_hosts_from_kernel();
+		state_file_clear();
 	}
 	spin_lock_bh(&ip_list_lock);
 	WRITE_ONCE(blocked_count_v4, 0);
@@ -488,7 +495,8 @@ void kb_debug_reboot(void)
 	WRITE_ONCE(state_restored, false);
 	WRITE_ONCE(allow_unload, false);
 
-	try_restore_state_from_disk();
+	if (recover)
+		try_restore_state_from_disk();
 	if (!state_restored)
 		generate_unload_key();
 }

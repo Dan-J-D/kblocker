@@ -22,7 +22,8 @@ What the descriptions in `kblocker.txt` exercise:
   with valid, torn and legacy records while no session is active, then
   triggers a simulated reboot through `debug_restore` (a debug-build-only
   attribute that drops the in-memory session, keeps the files and runs
-  recovery as at module init)
+  recovery as at module init; writing `0` instead is a clean boot that
+  resets all state, since it otherwise carries over between programs)
 - the periodic `remaining:` appends, which debug builds make every 2 seconds
   instead of every 60
 
@@ -39,6 +40,12 @@ The module is built with `KBLOCKER_DEBUG=1` and loaded in the VM with:
   syzkaller cannot feed what it reads from `key` into a later write, so with
   random keys the authorized `disable` and `unblock` paths would be
   unreachable.
+
+Each VM runs a single fuzzing process (`"procs": 1`). kblocker is one
+global state machine, so parallel programs in the same kernel undo each
+other's setup (a session started by one makes `pgp_active` read-only for
+another), which makes coverage flaky, keeps such paths out of the corpus
+and makes crashes hard to reproduce. Use more VMs (`VMS`) for throughput.
 
 `KBLOCKER_DEBUG` also checks kblocker's session invariants each time
 `kb_lock` is released (`kb_check_invariants()` in `src/state.c`). A violated

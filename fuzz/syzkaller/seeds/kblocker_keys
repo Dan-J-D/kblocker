@@ -1,5 +1,8 @@
 # With fixed_key=1: authorized disable of a PGP session, authorized unblock,
-# and disabling a restored session saved with the fixed key's hash
+# and disabling a restored session saved with the fixed key's hash. Starts
+# from a clean boot: state otherwise carries over from earlier programs.
+r9 = openat$kblocker_restore(0xffffffffffffff9c, &(0x7f0000001000)='/sys/kernel/kblocker/debug_restore\x00', 0x1, 0x0)
+write$kblocker_restore(r9, &(0x7f0000001100)='0\x00', 0x2)
 r0 = openat$kblocker_pgp(0xffffffffffffff9c, &(0x7f0000000000)='/sys/kernel/kblocker/pgp_active\x00', 0x2, 0x0)
 write$kblocker_pgp(r0, &(0x7f0000000100)={'1', []}, 0x1)
 r1 = openat$kblocker_enabled(0xffffffffffffff9c, &(0x7f0000000200)='/sys/kernel/kblocker/enabled\x00', 0x2, 0x0)
