@@ -19,3 +19,6 @@ KCSAN: data-race in (exit_signals|release_task) / (exit_signals|release_task)
 # return at once, the task is already woken
 KCSAN: data-race in (futex_do_wait|do_nanosleep|schedule_hrtimeout_range_clock) / hrtimer_wakeup
 KCSAN: data-race in hrtimer_wakeup / (futex_do_wait|do_nanosleep|schedule_hrtimeout_range_clock)
+# blk-mq tag allocation: sbitmap scans a word locklessly as a hint and claims
+# the bit with an atomic test_and_set_bit, retrying if it lost
+KCSAN: data-race in (_find_next_zero_bit|sbitmap_find_bit) / (_find_next_zero_bit|sbitmap_find_bit)
