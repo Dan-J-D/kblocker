@@ -88,7 +88,14 @@ stage_image() {
 	img="$WORK/image/trixie.img"
 	mkdir -p "$WORK/image"
 	if [[ ! -f "$img" ]]; then
-		(cd "$WORK/image" && "$WORK/syzkaller/tools/create-image.sh" --distribution trixie)
+		# debootstrap creates device nodes, so the chroot must live on a
+		# filesystem without nodev (home directories often have it); only
+		# the finished image and key are kept.
+		local build
+		build=$(mktemp -d "${IMAGE_BUILD_DIR:-/var/tmp}/kblocker-image.XXXXXX")
+		(cd "$build" && "$WORK/syzkaller/tools/create-image.sh" --distribution trixie)
+		mv "$build/trixie.img" "$build/trixie.id_rsa" "$build/trixie.id_rsa.pub" "$WORK/image/"
+		sudo rm -rf "$build"
 	fi
 
 	mnt=$(mktemp -d)
