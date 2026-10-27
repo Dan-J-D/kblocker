@@ -846,6 +846,7 @@ func doStatus() {
 	domainCount := parseField("blocked_domains")
 	protectCount := parseField("protected_files")
 	restoredState := parseField("state_restored")
+	pgpState := parseField("pgp_active")
 
 	count1, _ := strconv.Atoi(countV4)
 	count2, _ := strconv.Atoi(countV6)
@@ -864,6 +865,11 @@ func doStatus() {
 	} else {
 		fmt.Printf("%sBlocking: DISABLED%s\n", colorYellow, colorNC)
 		fmt.Println("  Run 'kblockerctl enable <minutes>' to activate")
+	}
+	if pgpState == "1" {
+		fmt.Printf("%s  Protection: PGP-armed (key required to disable/unload)%s\n", colorCyan, colorNC)
+	} else {
+		fmt.Println("  Protection: none (unload key readable)")
 	}
 	fmt.Printf("  Blocked IPs: %d\n", totalIPs)
 	fmt.Printf("  Blocked domains: %s\n", domainCount)

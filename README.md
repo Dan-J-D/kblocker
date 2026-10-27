@@ -75,6 +75,15 @@ sudo kblockerctl unblock-web
 # Opens on http://127.0.0.1:<random-port>
 ```
 
+### Surviving a reboot
+
+PGP-protected sessions are persisted to `/var/lib/kblocker/state` and restored
+when the module loads again. A restored session is always re-armed with PGP
+protection inside the kernel — the key stays erased from memory and `disable`
+still requires the key, so rebooting does not weaken the block. The block
+clears itself when the timer expires, key or not. Insecure (`--insecure`)
+sessions are never persisted and do not survive a reboot.
+
 ### Insecure mode
 
 Without any key registered, `--insecure` mode prints the key to stdout instead:

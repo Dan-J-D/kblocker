@@ -55,13 +55,15 @@ static ssize_t status_show(struct kobject *kobj, struct kobj_attribute *attr,
 			  "blocked_ips_v6: %d\nblocked_domains: %d\nblock_count: %d\n"
 			  "remaining: %llu\n"
 			  "allow_unload: %d\nprotected_files: %d\n"
-			  "state_restored: %d\n",
+			  "state_restored: %d\n"
+			  "pgp_active: %d\n",
 			  READ_ONCE(enabled), READ_ONCE(blocked_count_v4),
 			  READ_ONCE(blocked_count_v6),
 			  READ_ONCE(blocked_domain_count),
 			  READ_ONCE(blocked_count_v4) + READ_ONCE(blocked_count_v6),
 			  remaining_seconds(), READ_ONCE(allow_unload),
-			  protection_count(), READ_ONCE(state_restored));
+			  protection_count(), READ_ONCE(state_restored),
+			  READ_ONCE(pgp_active));
 }
 
 static ssize_t enabled_show(struct kobject *kobj, struct kobj_attribute *attr,

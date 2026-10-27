@@ -426,7 +426,6 @@ void try_restore_state_from_disk(void)
 	loff_t size;
 	u8 hash[32];
 	u64 rem = 0;
-	bool pgp = true;
 
 	if (enabled || state_restored)
 		return;
@@ -478,12 +477,6 @@ void try_restore_state_from_disk(void)
 	}
 	rem = min_t(u64, rem, MAX_SESSION_SECONDS);
 
-	/* Older state files were only written for PGP sessions and lack the
-	 * field, so a missing field means PGP. */
-	p = strstr(head, "pgp_active:");
-	if (p && p[11] == '0')
-		pgp = false;
-
 	filp_close(file, NULL);
 	file = NULL;
 
@@ -491,7 +484,9 @@ void try_restore_state_from_disk(void)
 	memzero_explicit(unload_key, sizeof(unload_key));
 	memzero_explicit(pgp_key, sizeof(pgp_key));
 	pgp_key_consumed = true;
-	WRITE_ONCE(pgp_active, pgp);
+	/* Only PGP sessions are ever persisted and the raw key is gone, so a
+	 * restored session is always PGP-locked, whatever the file says. */
+	WRITE_ONCE(pgp_active, true);
 	WRITE_ONCE(state_restored, true);
 	start_session(rem);
 	printk(KERN_INFO "kblocker: state restored, %llu seconds remaining\n", rem);

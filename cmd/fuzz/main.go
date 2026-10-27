@@ -240,7 +240,6 @@ func cleanupModuleArtifacts() {
 		writeSysfs("pgp_active", "0")
 		writeSysfs("blocked_ips", "\n")
 		writeSysfs("blocked_domains", "\n")
-		writeSysfs("update_hosts", "\n")
 		writeSysfs("unblock", randHex(32))
 		forceUnloadModule()
 	}
@@ -421,22 +420,6 @@ func fuzzPhase1(n int) (pass, fail int, errors []string) {
 				return randHex(33)
 			}
 		}},
-		{attr: "restore", gen: func() string {
-			switch randInt(6) {
-			case 0:
-				return randHex(64) + ":" + strconv.Itoa(int(time.Now().Unix())+3600)
-			case 1:
-				return randStr(randInt(128))
-			case 2:
-				return ""
-			case 3:
-				return randHex(randInt(32))
-			case 4:
-				return randHex(63) + ":" + strconv.Itoa(int(time.Now().Unix())+3600)
-			default:
-				return randHex(65) + ":" + strconv.Itoa(int(time.Now().Unix())+3600)
-			}
-		}},
 		{attr: "pgp_active", gen: func() string {
 			switch randInt(7) {
 			case 0:
@@ -453,20 +436,6 @@ func fuzzPhase1(n int) (pass, fail int, errors []string) {
 				return "true"
 			default:
 				return "false"
-			}
-		}},
-		{attr: "update_hosts", gen: func() string {
-			switch randInt(5) {
-			case 0:
-				return ""
-			case 1:
-				return "1"
-			case 2:
-				return "trigger"
-			case 3:
-				return randStr(randInt(128))
-			default:
-				return randHex(randInt(32))
 			}
 		}},
 	}
@@ -611,7 +580,7 @@ func fuzzPhase3() (pass, fail int, errors []string) {
 		}
 
 		// Verify sysfs tree
-		expected := []string{"status", "enabled", "blocked_ips", "blocked_domains", "key", "unblock", "disable", "remaining", "restore", "pgp_active", "update_hosts", "block_count"}
+		expected := []string{"status", "enabled", "blocked_ips", "blocked_domains", "key", "unblock", "disable", "remaining", "pgp_active", "block_count"}
 		for _, attr := range expected {
 			info, err := os.Stat(sysfsBase + "/" + attr)
 			if err != nil {
@@ -619,6 +588,16 @@ func fuzzPhase3() (pass, fail int, errors []string) {
 				fail++
 			} else {
 				_ = info
+				pass++
+			}
+		}
+
+		// Session restore and hosts rewrites are kernel-internal only
+		for _, attr := range []string{"restore", "update_hosts"} {
+			if _, err := os.Stat(sysfsBase + "/" + attr); err == nil {
+				errors = append(errors, fmt.Sprintf("removed sysfs attr present: %s", attr))
+				fail++
+			} else {
 				pass++
 			}
 		}
@@ -881,10 +860,6 @@ func fuzzPhase5() (pass, fail int, errors []string) {
 		{"unicode/utf8 payload", "blocked_domains", "éxämplé.com\n日本語.com"},
 		{"very large number for enable", "enabled", "99999999999999999999999999999"},
 		{"negative seconds for enable", "enabled", "-3600"},
-		{"zero-length restore", "restore", ""},
-		{"restore with future timestamp", "restore", randHex(64) + ":" + strconv.Itoa(int(time.Now().Unix())+86400)},
-		{"restore with past timestamp", "restore", randHex(64) + ":" + strconv.Itoa(int(time.Now().Unix())-86400)},
-		{"restore short hash", "restore", randHex(32) + ":" + strconv.Itoa(int(time.Now().Unix())+3600)},
 	}
 
 	for _, tt := range tests {
@@ -931,7 +906,7 @@ func fuzzPhase6(n int) (pass, fail int, errors []string) {
 	var wg sync.WaitGroup
 	doneChan := make(chan struct{})
 
-	attrs := []string{"enabled", "blocked_ips", "blocked_domains", "disable", "unblock", "pgp_active", "restore", "update_hosts"}
+	attrs := []string{"enabled", "blocked_ips", "blocked_domains", "disable", "unblock", "pgp_active"}
 
 	// Writer goroutines
 	for i := 0; i < n; i++ {
@@ -960,10 +935,6 @@ func fuzzPhase6(n int) (pass, fail int, errors []string) {
 					data = randHex(32)
 				case "pgp_active":
 					data = strconv.Itoa(randInt(2))
-				case "restore":
-					data = randHex(64) + ":" + strconv.Itoa(int(time.Now().Unix())+3600)
-				case "update_hosts":
-					data = "1"
 				}
 
 				writeSysfs(attr, data)
@@ -1010,7 +981,6 @@ func fuzzPhase6(n int) (pass, fail int, errors []string) {
 	writeSysfs("pgp_active", "0")
 	writeSysfs("blocked_ips", "\n")
 	writeSysfs("blocked_domains", "\n")
-	writeSysfs("update_hosts", "\n")
 
 	reportPhase("Phase 6: Concurrent access", pass, fail, errors)
 	return
@@ -1037,9 +1007,9 @@ func fuzzPhase7() (pass, fail int, errors []string) {
 
 	domains := []string{"blocked1.example.com", "blocked2.example.com"}
 
-	// Set domains and trigger update_hosts
+	// Enabling writes the hosts entries
 	writeSysfs("blocked_domains", strings.Join(domains, "\n"))
-	writeSysfs("update_hosts", "1")
+	writeSysfs("enabled", "60")
 	time.Sleep(500 * time.Millisecond)
 
 	if !dmesgContains("updated hosts file with 2 domains") {
@@ -1078,10 +1048,9 @@ func fuzzPhase7() (pass, fail int, errors []string) {
 		}
 	}
 
-	// Clear domains and trigger update_hosts (should trigger clear_hosts_from_kernel)
-	chattr(hostsFile, "-i")
+	// Disabling removes them
+	writeSysfs("enabled", "0")
 	writeSysfs("blocked_domains", "\n")
-	writeSysfs("update_hosts", "1")
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify hosts file was cleared by the kernel
@@ -1130,18 +1099,31 @@ func fuzzPhase8() (pass, fail int, errors []string) {
 	} else {
 		pass++
 
-		// Write a manual state file (simulating kblockerctl storeState)
 		hash := sha256Hex(key)
-		expiry := time.Now().Unix() + 120
+		if hash == "" {
+			errors = append(errors, "could not hash key for state test")
+			fail++
+		} else {
+			pass++
+		}
 
+		// Disable cleanly first: disabling truncates the state file, so it
+		// must be written afterwards. This mirrors a reboot, where the
+		// module is gone without going through disable and the kernel
+		// restores from whatever state file exists at next boot.
+		writeSysfs("enabled", "0")
+
+		// Now persist the state file the way kblockerctl storeState() does.
+		// Note: the real state file has NO pgp_active line — protection
+		// after restore is a kernel invariant, not a file flag.
+		expiry := time.Now().Unix() + 120
 		os.MkdirAll("/var/lib/kblocker", 0755)
 		chattr(stateFile, "-i")
-		stateContent := fmt.Sprintf("key_hash:%s\nexpiry:%d\ndomains:persist-test.com\nblocked_ips:10.0.0.55\npgp_active:0\n", hash, expiry)
+		stateContent := fmt.Sprintf("key_hash:%s\nexpiry:%d\ndomains:persist-test.com\nblocked_ips:10.0.0.55\n", hash, expiry)
 		os.WriteFile(stateFile, []byte(stateContent), 0600)
 		chattr(stateFile, "+i")
 
-		// Reload module
-		writeSysfs("enabled", "0")
+		// Reload module (simulates reboot: module loads with a state file)
 		writeSysfs("pgp_active", "0")
 		if err := unloadModule(); err != nil {
 			errors = append(errors, fmt.Sprintf("unload for state test: %v", err))
@@ -1185,6 +1167,45 @@ func fuzzPhase8() (pass, fail int, errors []string) {
 			ips := readSysfs("blocked_ips")
 			if !strings.Contains(ips, "10.0.0.55") {
 				errors = append(errors, fmt.Sprintf("IPs not restored: %q", ips))
+				fail++
+			} else {
+				pass++
+			}
+
+			// Regression: a restored session must be PGP-protected even
+			// though the state file has no pgp_active line.
+			pgpRaw := readSysfs("pgp_active")
+			if strings.TrimSpace(pgpRaw) == "1" {
+				pass++
+			} else {
+				errors = append(errors, fmt.Sprintf("expected pgp_active=1 after restore (reboot bypass!), got %q", pgpRaw))
+				fail++
+			}
+
+			// Disabling without the key must be rejected after restore.
+			if err := writeSysfs("enabled", "0"); err == nil {
+				errors = append(errors, "enabled=0 accepted after restore without key (reboot bypass!)")
+				fail++
+			} else {
+				pass++
+			}
+			if err := writeSysfs("pgp_active", "0"); err == nil {
+				errors = append(errors, "pgp_active=0 accepted after restore (reboot bypass!)")
+				fail++
+			} else {
+				pass++
+			}
+
+			// Only the recorded key can disable a restored session.
+			if err := writeSysfs("disable", key); err != nil {
+				errors = append(errors, fmt.Sprintf("disable with correct key after restore: %v", err))
+				fail++
+			} else {
+				pass++
+			}
+			enabled = readSysfs("enabled")
+			if !strings.HasPrefix(enabled, "0") {
+				errors = append(errors, fmt.Sprintf("expected disabled after keyed disable, got %q", enabled))
 				fail++
 			} else {
 				pass++
@@ -1555,7 +1576,6 @@ func main() {
 	writeSysfs("pgp_active", "0")
 	writeSysfs("blocked_ips", "\n")
 	writeSysfs("blocked_domains", "\n")
-	writeSysfs("update_hosts", "\n")
 
 	fuzzPhase3()
 
