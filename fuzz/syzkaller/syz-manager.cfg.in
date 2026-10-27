@@ -14,7 +14,8 @@
 		"count": @VMS@,
 		"kernel": "@WORK@/linux/arch/x86/boot/bzImage",
 		"cpu": 2,
-		"mem": 2048
+		"mem": 2048,
+		"cmdline": "net.ifnames=0"
 	},
 	"enable_syscalls": [
 		"openat$kblocker*",
