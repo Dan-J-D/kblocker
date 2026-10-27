@@ -9,7 +9,10 @@ You want to block distracting sites and make it *genuinely hard* to disable the 
 - The kernel module hooks `NF_INET_LOCAL_OUT` and `NF_INET_FORWARD`, inspects TLS SNI, and drops matching connections
 - Disabling or unloading requires a 128-bit key, validated against a SHA-256 hash stored in the kernel
 - With PGP mode, the key is encrypted to your trusted recipients' GPG public keys and then **erased from kernel memory**. The only way to retrieve it is to have someone else PGP-decrypt it. You've outsourced your willpower.
-- The module file, auto-load config, hosts file, and domains config are protected with `chattr +i` (immutable) and `inode_operations` overrides, re-applied every second
+- While a session is enabled, the module file, auto-load config, hosts file and state file are protected by kernel-set immutable/append-only flags and `inode_operations` overrides (which also refuse `chattr`), re-checked every second. Nothing is protected while disabled.
+- Domain rules match the exact name or any subdomain (`x.com` blocks `www.x.com`, not `netflix.com`). While domains are blocked, QUIC (UDP/443) is dropped so browsers fall back to TCP where SNI is visible.
+- Sessions are timed with the boot-time clock, so changing the system clock cannot end them. A PGP session is persisted by the kernel itself and restored when the module loads; time spent powered off does not count towards the session.
+- Requires Linux 6.3 or newer.
 
 ## Quick start
 
@@ -91,7 +94,7 @@ sudo kblockerctl enable 60 --insecure
 | `block <domain>...` | Write domains to kernel and config file (does not enable) |
 | `add <domain>` | Add a domain to the persistent config |
 | `remove <domain>` | Remove a domain |
-| `reload` | Re-write domains to kernel, refresh PGP ciphertexts, restore persisted state |
+| `reload` | Re-write domains to kernel, refresh PGP ciphertexts |
 | `block-ip <ip>...` | Set blocked IPs directly (replaces existing list) |
 | `list` | Show blocked IPs and configured domains |
 | `key` | Show the current unload key and PGP key fingerprints |
@@ -118,7 +121,7 @@ sudo kblockerctl enable 60 --insecure
 │                                                          │
 │  PGP keys: /etc/kblocker/keys/                           │
 │  Ciphertexts: /var/lib/kblocker/unlock-pgp/              │
-│  Persisted state: /var/lib/kblocker/state                │
+│  Persisted state: /var/lib/kblocker/state (kernel-owned) │
 │  Domain config: /etc/kblocker/domains.conf               │
 │                                                          │
 │  Web UIs: add-pgp-web (key gen)                          │
@@ -131,12 +134,14 @@ sudo kblockerctl enable 60 --insecure
 │  netfilter hooks (LOCAL_OUT, FORWARD)                    │
 │    ├─ IPv4/IPv6 IP blacklist check                       │
 │    ├─ TLS SNI inspection (domain blacklist)              │
-│    └─ TLS ECH (0xFE0A) drop to force SNI fallback        │
+│    ├─ outer SNI matched for ECH (0xFE0D) hellos          │
+│    └─ UDP/443 (QUIC) drop to force TCP fallback          │
 │                                                          │
 │  File protection (inode_operations override + immut)     │
 │    ├─ kblocker.ko                                        │
 │    ├─ /etc/modules-load.d/kblocker.conf                  │
-│    └─ /etc/hosts                                         │
+│    ├─ /etc/hosts                                         │
+│    └─ /var/lib/kblocker/state (append-only)              │
 │                                                          │
 │  Key management                                          │
 │    ├─ 128-bit random key at module init                  │
@@ -144,7 +149,9 @@ sudo kblockerctl enable 60 --insecure
 │    ├─ PGP mode: key zeroed on pgp_active=1               │
 │    └─ disable: regenerates key + clears pgp_active       │
 │                                                          │
-│  Timer: auto-disable on expiry (checks every 1s)         │
+│  Timer: auto-disable on expiry (boottime, checks 1s)     │
+│  State: remaining time appended every 60s, restored at   │
+│         module load only                                 │
 │  Workqueue: file protection re-check (every 1s)          │
 └──────────────────────────────────────────────────────────┘
 ```

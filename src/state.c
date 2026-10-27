@@ -1,269 +1,504 @@
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/sysfs.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/fs.h>
+#include <linux/fileattr.h>
+#include <linux/mount.h>
+#include <linux/namei.h>
 #include <linux/timer.h>
-#include <linux/ktime.h>
+#include <linux/timekeeping.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
 #include <linux/inet.h>
+#include <net/ipv6.h>
 #include "kblocker.h"
 
-static void do_disable_cleanup(void)
+/*
+ * The running session is timed with the boottime clock, which root
+ * cannot set. The wall clock is never consulted while a session runs.
+ * Across reboots only the remaining duration is persisted, so time
+ * spent powered off does not count and clock changes cannot shorten
+ * a session.
+ */
+static u64 expiry_boot;
+static unsigned int save_ticks;
+static struct timer_list enable_timer;
+static struct work_struct kb_expire_work;
+
+/* Held open from session start; the file is append-only while protected */
+static struct file *state_filp;
+
+/* Head of the state file holding key/domains/IPs, and tail holding the
+ * most recent remaining: line */
+#define STATE_HEAD_MAX (256 * 1024)
+#define STATE_TAIL_MAX 128
+
+static u64 now_boot(void)
 {
-	log_blocklist_on_disable();
-	clear_hosts_from_kernel();
-
-	if (READ_ONCE(enable_timer_active)) {
-		timer_delete(&enable_timer);
-		WRITE_ONCE(enable_timer_active, false);
-	}
-
-	{
-		struct file *sf;
-		sf = filp_open(STATE_FILE, O_RDWR, 0);
-		if (!IS_ERR(sf)) {
-			struct inode *inode = file_inode(sf);
-			if (inode) {
-				inode_lock(inode);
-				if (inode->i_flags & S_IMMUTABLE)
-					inode_set_flags(inode, 0, S_IMMUTABLE);
-				inode_unlock(inode);
-			}
-			vfs_truncate(&sf->f_path, 0);
-			filp_close(sf, NULL);
-		}
-	}
-
-	printk(KERN_INFO "kblocker: disabled\n");
+	return ktime_get_boottime_seconds();
 }
 
-static void do_disable(void)
+u64 remaining_seconds(void)
+{
+	u64 exp, now;
+
+	if (!READ_ONCE(enabled))
+		return 0;
+
+	exp = READ_ONCE(expiry_boot);
+	now = now_boot();
+	return exp > now ? exp - now : 0;
+}
+
+/* Clear on-disk immutable/append-only flags (e.g. a chattr +i set by an
+ * older kblockerctl), so the file can be rewritten or truncated. */
+static void clear_ondisk_flags(const struct path *p)
+{
+	kb_fileattr_t fa;
+	int err;
+
+	if (vfs_fileattr_get(p->dentry, &fa))
+		return;
+	if (!(fa.flags & (FS_IMMUTABLE_FL | FS_APPEND_FL)))
+		return;
+
+	fileattr_fill_flags(&fa, fa.flags & ~(FS_IMMUTABLE_FL | FS_APPEND_FL));
+	err = vfs_fileattr_set(mnt_idmap(p->mnt), p->dentry, &fa);
+	if (err)
+		printk(KERN_WARNING "kblocker: clearing flags on %s failed: %d\n",
+		       STATE_FILE, err);
+}
+
+static void state_file_close(void)
+{
+	if (state_filp) {
+		filp_close(state_filp, NULL);
+		state_filp = NULL;
+	}
+}
+
+/* Truncate the persisted session so a reboot does not restore it.
+ * Caller holds kb_lock and file protection is already off. */
+void state_file_clear(void)
+{
+	struct path p;
+	int err;
+
+	state_file_close();
+
+	if (kern_path(STATE_FILE, LOOKUP_FOLLOW, &p))
+		return;
+	clear_ondisk_flags(&p);
+	err = vfs_truncate(&p, 0);
+	if (err)
+		printk(KERN_ERR "kblocker: truncating %s failed: %d\n",
+		       STATE_FILE, err);
+	path_put(&p);
+}
+
+static int state_file_write_session(u64 seconds)
+{
+	char (*doms)[MAX_DOMAIN_LEN];
+	__be32 *v4;
+	struct in6_addr *v6;
+	size_t size, len;
+	char *buf;
+	struct file *f;
+	struct path p;
+	loff_t pos = 0;
+	ssize_t written;
+	int nd, n4, n6, i, ret = -ENOMEM;
+
+	state_file_close();
+
+	doms = kmalloc_array(MAX_DOMAINS, MAX_DOMAIN_LEN, GFP_KERNEL);
+	v4 = kmalloc_array(MAX_IPS_V4, sizeof(*v4), GFP_KERNEL);
+	v6 = kmalloc_array(MAX_IPS_V6, sizeof(*v6), GFP_KERNEL);
+	size = 256 + MAX_DOMAINS * (MAX_DOMAIN_LEN + 1) +
+	       MAX_IPS_V4 * 16 + MAX_IPS_V6 * 41;
+	buf = kvmalloc(size, GFP_KERNEL);
+	if (!doms || !v4 || !v6 || !buf)
+		goto out;
+
+	nd = snapshot_domains(doms);
+	spin_lock_bh(&ip_list_lock);
+	n4 = blocked_count_v4;
+	n6 = blocked_count_v6;
+	memcpy(v4, blocked_ips_v4, n4 * sizeof(*v4));
+	memcpy(v6, blocked_ips_v6, n6 * sizeof(*v6));
+	spin_unlock_bh(&ip_list_lock);
+
+	len = scnprintf(buf, size, "remaining:%llu\nkey_hash:%*phN\npgp_active:%d\n",
+			seconds, 32, key_hash, pgp_active);
+	if (nd) {
+		len += scnprintf(buf + len, size - len, "domains:");
+		for (i = 0; i < nd; i++)
+			len += scnprintf(buf + len, size - len, "%s%s",
+					 i ? "," : "", doms[i]);
+		len += scnprintf(buf + len, size - len, "\n");
+	}
+	if (n4 || n6) {
+		len += scnprintf(buf + len, size - len, "blocked_ips:");
+		for (i = 0; i < n4; i++)
+			len += scnprintf(buf + len, size - len, "%pI4,", &v4[i]);
+		for (i = 0; i < n6; i++)
+			len += scnprintf(buf + len, size - len, "%pI6c,", &v6[i]);
+		len += scnprintf(buf + len, size - len, "\n");
+	}
+
+	if (!kern_path(STATE_FILE, LOOKUP_FOLLOW, &p)) {
+		clear_ondisk_flags(&p);
+		path_put(&p);
+	}
+
+	f = filp_open(STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0600);
+	if (IS_ERR(f)) {
+		ret = PTR_ERR(f);
+		printk(KERN_ERR "kblocker: cannot open %s: %d\n", STATE_FILE, ret);
+		goto out;
+	}
+
+	written = kernel_write(f, buf, len, &pos);
+	if (written != len) {
+		printk(KERN_ERR "kblocker: writing %s failed: %zd\n",
+		       STATE_FILE, written);
+		filp_close(f, NULL);
+		ret = written < 0 ? written : -EIO;
+		goto out;
+	}
+	vfs_fsync(f, 0);
+	state_filp = f;
+	ret = 0;
+out:
+	kvfree(buf);
+	kfree(v6);
+	kfree(v4);
+	kfree(doms);
+	return ret;
+}
+
+/* Append the current remaining duration. Uses the descriptor opened
+ * before protection made the file append-only and unwritable. */
+static void state_file_append_remaining(u64 rem)
+{
+	char line[40];
+	loff_t pos = 0;
+	int len;
+
+	if (!state_filp)
+		return;
+	len = scnprintf(line, sizeof(line), "remaining:%llu\n", rem);
+	if (kernel_write(state_filp, line, len, &pos) != len)
+		printk(KERN_WARNING "kblocker: saving remaining time failed\n");
+	else
+		vfs_fsync(state_filp, 1);
+}
+
+static void stop_session(void)
 {
 	WRITE_ONCE(enabled, false);
-	expiry_seconds = 0;
+	WRITE_ONCE(expiry_boot, 0);
 	WRITE_ONCE(state_restored, false);
 	WRITE_ONCE(pgp_active, false);
 	memzero_explicit(pgp_key, sizeof(pgp_key));
 	pgp_key_consumed = true;
+	timer_delete(&enable_timer);
 	if (atomic_xchg(&ref_taken, 0))
 		module_put(THIS_MODULE);
-	do_disable_cleanup();
 }
 
-void do_disable_work(struct work_struct *work)
-{
-	do_disable_cleanup();
-}
-
+/* Caller holds kb_lock */
 void disable_blocking(void)
 {
-	do_disable();
+	stop_session();
+	protection_disable();
+	log_blocklist_on_disable();
+	clear_hosts_from_kernel();
+	state_file_clear();
+	printk(KERN_INFO "kblocker: disabled\n");
 }
 
-void enable_timer_cb(struct timer_list *t)
+static void start_session(u64 seconds)
 {
-	if (!READ_ONCE(enabled))
-		return;
+	WRITE_ONCE(expiry_boot, now_boot() + seconds);
+	WRITE_ONCE(allow_unload, false);
+	WRITE_ONCE(enabled, true);
+	if (!atomic_xchg(&ref_taken, 1))
+		__module_get(THIS_MODULE);
 
-	if (ktime_get_real_seconds() >= expiry_seconds) {
-		WRITE_ONCE(enabled, false);
-		expiry_seconds = 0;
-		WRITE_ONCE(state_restored, false);
-		WRITE_ONCE(pgp_active, false);
-		memzero_explicit(pgp_key, sizeof(pgp_key));
-		pgp_key_consumed = true;
-		if (atomic_xchg(&ref_taken, 0))
-			module_put(THIS_MODULE);
-		printk(KERN_INFO "kblocker: timer-expired, disabling\n");
-		schedule_work(&kb_disable_work);
-		return;
-	}
+	update_hosts_file();
+	/* Only PGP sessions are locked; others can be disabled without a
+	 * key anyway, so they are not persisted across reboots. */
+	if (pgp_active)
+		state_file_write_session(seconds);
+	else
+		state_file_clear();
+	protection_enable();
 
+	save_ticks = 0;
 	mod_timer(&enable_timer, jiffies + HZ);
 }
 
-void enable_blocking(unsigned int seconds)
+/* Caller holds kb_lock */
+int enable_blocking(u64 seconds)
 {
+	if (enabled)
+		return -EPERM;
+	if (!seconds || seconds > MAX_SESSION_SECONDS)
+		return -EINVAL;
+
 	generate_unload_key();
 	/* PGP pre-arm: if pgp_active was set to 1 before enable,
 	 * copy key to one-shot buffer, immediately zero unload_key,
 	 * and lock pgp_active. */
-	if (READ_ONCE(pgp_active)) {
-		memcpy(pgp_key, unload_key, 16);
+	if (pgp_active) {
+		memcpy(pgp_key, unload_key, sizeof(pgp_key));
 		pgp_key_consumed = false;
 		memzero_explicit(unload_key, sizeof(unload_key));
 	} else {
 		memzero_explicit(pgp_key, sizeof(pgp_key));
 		pgp_key_consumed = true;
 	}
-	WRITE_ONCE(enabled, true);
-	expiry_seconds = ktime_get_real_seconds() + seconds;
-	mod_timer(&enable_timer, jiffies + HZ);
-	WRITE_ONCE(enable_timer_active, true);
 	WRITE_ONCE(state_restored, false);
-	if (!atomic_xchg(&ref_taken, 1)) {
-		__module_get(THIS_MODULE);
-	}
-	/* Re-enable file protection if it was disabled by a prior unblock */
-	WRITE_ONCE(allow_unload, false);
-	if (!timer_active || !timer_pending(&protect_timer)) {
-		mod_timer(&protect_timer,
-			  jiffies + msecs_to_jiffies(PROTECT_INTERVAL_MS));
-		timer_active = true;
-	}
-	update_hosts_file();
-	printk(KERN_INFO "kblocker: enabled for %u seconds\n", seconds);
+	start_session(seconds);
+	printk(KERN_INFO "kblocker: enabled for %llu seconds\n", seconds);
+	return 0;
 }
 
-u64 remaining_seconds(void)
+static void kb_expire_work_fn(struct work_struct *work)
 {
-	u64 exp;
+	u64 rem;
 
-	if (!READ_ONCE(enabled))
-		return 0;
+	mutex_lock(&kb_lock);
+	if (!enabled)
+		goto out;
 
-	exp = READ_ONCE(expiry_seconds);
-	if (!exp || ktime_get_real_seconds() >= exp)
-		return 0;
-
-	return exp - ktime_get_real_seconds();
-}
-
-void do_restore(const u8 *hash, u64 expiry_ts)
-{
-	if (expiry_ts <= ktime_get_real_seconds()) {
-		printk(KERN_INFO "kblocker: restore skipped (already expired)\n");
-		return;
+	rem = remaining_seconds();
+	if (!rem) {
+		printk(KERN_INFO "kblocker: timer-expired, disabling\n");
+		disable_blocking();
+		goto out;
 	}
 
-	memcpy(key_hash, hash, 32);
-	WRITE_ONCE(state_restored, true);
-	WRITE_ONCE(allow_unload, false);
-
-	u64 delta = expiry_ts - ktime_get_real_seconds();
-	expiry_seconds = expiry_ts;
-
-	WRITE_ONCE(enabled, true);
-	if (!atomic_xchg(&ref_taken, 1))
-		__module_get(THIS_MODULE);
+	if (++save_ticks >= STATE_SAVE_INTERVAL_S) {
+		save_ticks = 0;
+		state_file_append_remaining(rem);
+	}
 	mod_timer(&enable_timer, jiffies + HZ);
-	WRITE_ONCE(enable_timer_active, true);
-	update_hosts_file();
-
-	printk(KERN_INFO "kblocker: state restored, %llu seconds remaining\n", delta);
+out:
+	mutex_unlock(&kb_lock);
 }
 
+static void enable_timer_cb(struct timer_list *t)
+{
+	schedule_work(&kb_expire_work);
+}
+
+void session_init(void)
+{
+	INIT_WORK(&kb_expire_work, kb_expire_work_fn);
+	timer_setup(&enable_timer, enable_timer_cb, 0);
+}
+
+void session_exit(void)
+{
+	timer_delete_sync(&enable_timer);
+	cancel_work_sync(&kb_expire_work);
+	timer_delete_sync(&enable_timer);
+
+	mutex_lock(&kb_lock);
+	state_file_clear();
+	mutex_unlock(&kb_lock);
+}
+
+static ssize_t read_at(struct file *f, char *buf, size_t len, loff_t pos)
+{
+	ssize_t ret = kernel_read(f, buf, len, &pos);
+
+	if (ret < 0)
+		return ret;
+	buf[ret] = '\0';
+	return ret;
+}
+
+/* Value of the last complete "remaining:N\n" line in @s, or 0 */
+static u64 last_remaining(const char *s)
+{
+	const char *p = s, *hit;
+	u64 val = 0, v;
+	char *end;
+
+	while ((hit = strstr(p, "remaining:"))) {
+		p = hit + 10;
+		if (hit != s && hit[-1] != '\n')
+			continue;
+		v = simple_strtoull(p, &end, 10);
+		if (end != p && *end == '\n')
+			val = v;
+	}
+	return val;
+}
+
+static void restore_domains(char *buf)
+{
+	char *p, *end, *copy, *orig, *token;
+	int nd = 0;
+
+	p = strstr(buf, "domains:");
+	if (!p)
+		return;
+	p += 8;
+	end = strchr(p, '\n');
+	if (!end || end == p)
+		return;
+	copy = kmemdup_nul(p, end - p, GFP_KERNEL);
+	if (!copy)
+		return;
+	orig = copy;
+
+	spin_lock_bh(&ip_list_lock);
+	while ((token = strsep(&copy, ",")) && nd < MAX_DOMAINS) {
+		int dlen = strlen(token);
+		if (dlen > 0 && dlen < MAX_DOMAIN_LEN) {
+			memcpy(blocked_domains[nd], token, dlen + 1);
+			nd++;
+		}
+	}
+	WRITE_ONCE(blocked_domain_count, nd);
+	spin_unlock_bh(&ip_list_lock);
+	kfree(orig);
+}
+
+static void restore_ips(char *buf)
+{
+	char *p, *end, *copy, *orig, *token;
+	__be32 *tmp_v4;
+	struct in6_addr *tmp_v6;
+	int n4 = 0, n6 = 0;
+
+	p = strstr(buf, "blocked_ips:");
+	if (!p)
+		return;
+	p += 12;
+	end = strchr(p, '\n');
+	if (!end || end == p)
+		return;
+	copy = kmemdup_nul(p, end - p, GFP_KERNEL);
+	tmp_v4 = kmalloc_array(MAX_IPS_V4, sizeof(__be32), GFP_KERNEL);
+	tmp_v6 = kmalloc_array(MAX_IPS_V6, sizeof(struct in6_addr), GFP_KERNEL);
+	if (!copy || !tmp_v4 || !tmp_v6)
+		goto out;
+	orig = copy;
+
+	while ((token = strsep(&copy, ","))) {
+		__be32 addr4;
+		struct in6_addr addr6;
+		if (token[0] == '\0') continue;
+		if (in6_pton(token, -1, (u8 *)&addr6, '\0', NULL)) {
+			if (n6 < MAX_IPS_V6) tmp_v6[n6++] = addr6;
+		} else if (in4_pton(token, -1, (u8 *)&addr4, '\0', NULL)) {
+			if (n4 < MAX_IPS_V4) tmp_v4[n4++] = addr4;
+		}
+	}
+	spin_lock_bh(&ip_list_lock);
+	memcpy(blocked_ips_v4, tmp_v4, n4 * sizeof(__be32));
+	memcpy(blocked_ips_v6, tmp_v6, n6 * sizeof(struct in6_addr));
+	WRITE_ONCE(blocked_count_v4, n4);
+	WRITE_ONCE(blocked_count_v6, n6);
+	spin_unlock_bh(&ip_list_lock);
+	copy = orig;
+out:
+	kfree(tmp_v4);
+	kfree(tmp_v6);
+	kfree(copy);
+}
+
+/*
+ * Called once from module init, under kb_lock. This is the only way a
+ * session can be restored; there is no sysfs interface for it.
+ */
 void try_restore_state_from_disk(void)
 {
 	struct file *file;
-	char *buf;
-	loff_t len;
+	char *head = NULL, *tail = NULL, *p, *end;
+	loff_t size;
 	u8 hash[32];
-	u64 expiry;
-	char *p, *end;
+	u64 rem = 0;
+	bool pgp = true;
+
+	if (enabled || state_restored)
+		return;
 
 	file = filp_open(STATE_FILE, O_RDONLY, 0);
 	if (IS_ERR(file))
 		return;
 
-	buf = hosts_read_all(file, &len);
-	if (!buf) {
-		filp_close(file, NULL);
-		return;
-	}
+	size = i_size_read(file_inode(file));
+	if (size <= 0)
+		goto out;
+	head = kvmalloc(STATE_HEAD_MAX + 1, GFP_KERNEL);
+	tail = kmalloc(STATE_TAIL_MAX + 1, GFP_KERNEL);
+	if (!head || !tail)
+		goto out;
+	if (read_at(file, head, min_t(loff_t, size, STATE_HEAD_MAX), 0) <= 0)
+		goto out;
+	if (read_at(file, tail, min_t(loff_t, size, STATE_TAIL_MAX),
+		    max_t(loff_t, size - STATE_TAIL_MAX, 0)) < 0)
+		goto out;
 
-	p = strstr(buf, "domains:");
-	if (p) {
-		p += 8;
-		end = strchr(p, '\n');
-		if (end && end > p) {
-			char *copy = kstrdup(p, GFP_KERNEL);
-			if (copy) {
-				char *token, *orig = copy;
-				int nd = 0;
-				copy[end - p] = '\0';
-				spin_lock_bh(&ip_list_lock);
-				while ((token = strsep(&copy, ",")) && nd < MAX_DOMAINS) {
-					int dlen = strlen(token);
-					if (dlen > 0 && dlen < MAX_DOMAIN_LEN) {
-						memcpy(blocked_domains[nd], token, dlen);
-						blocked_domains[nd][dlen] = '\0';
-						nd++;
-					}
-				}
-				blocked_domain_count = nd;
-				spin_unlock_bh(&ip_list_lock);
-				kfree(orig);
-			}
+	restore_domains(head);
+	restore_ips(head);
+
+	p = strstr(head, "key_hash:");
+	if (!p)
+		goto out;
+	p += 9;
+	end = strchr(p, '\n');
+	if (!end || end - p != 64 || hex_decode(p, hash, 32))
+		goto out;
+
+	rem = last_remaining(tail);
+	if (!rem)
+		rem = last_remaining(head);
+	if (!rem) {
+		/* Legacy file written by older kblockerctl: wall-clock deadline */
+		p = strstr(head, "expiry:");
+		if (p) {
+			u64 expiry = simple_strtoull(p + 7, &end, 10);
+			time64_t now = ktime_get_real_seconds();
+			if (end != p + 7 && expiry > now)
+				rem = expiry - now;
 		}
 	}
-
-	p = strstr(buf, "blocked_ips:");
-	if (p) {
-		p += 12;
-		end = strchr(p, '\n');
-		if (end && end > p) {
-			char *copy = kstrdup(p, GFP_KERNEL);
-			if (copy) {
-				char *token, *orig = copy;
-				__be32 *tmp_v4 = kmalloc_array(MAX_IPS_V4, sizeof(__be32), GFP_KERNEL);
-				struct in6_addr *tmp_v6 = kmalloc_array(MAX_IPS_V6, sizeof(struct in6_addr), GFP_KERNEL);
-				int n4 = 0, n6 = 0;
-
-				copy[end - p] = '\0';
-				if (tmp_v4 && tmp_v6) {
-					while ((token = strsep(&copy, ","))) {
-						__be32 addr4;
-						struct in6_addr addr6;
-						if (token[0] == '\0') continue;
-						if (in6_pton(token, -1, (u8 *)&addr6, '\0', NULL)) {
-							if (n6 < MAX_IPS_V6) tmp_v6[n6++] = addr6;
-						} else if (in4_pton(token, -1, (u8 *)&addr4, '\0', NULL)) {
-							if (n4 < MAX_IPS_V4) tmp_v4[n4++] = addr4;
-						}
-					}
-					spin_lock_bh(&ip_list_lock);
-					memcpy(blocked_ips_v4, tmp_v4, n4 * sizeof(__be32));
-					memcpy(blocked_ips_v6, tmp_v6, n6 * sizeof(struct in6_addr));
-					WRITE_ONCE(blocked_count_v4, n4);
-					WRITE_ONCE(blocked_count_v6, n6);
-					spin_unlock_bh(&ip_list_lock);
-				}
-				kfree(tmp_v4);
-				kfree(tmp_v6);
-				kfree(orig);
-			}
-		}
+	if (!rem) {
+		printk(KERN_INFO "kblocker: restore skipped (already expired)\n");
+		goto out;
 	}
+	rem = min_t(u64, rem, MAX_SESSION_SECONDS);
 
-	p = strstr(buf, "key_hash:");
-	if (p) {
-		p += 9;
-		end = strchr(p, '\n');
-		if (end && (end - p) == 64 && !hex_decode(p, hash, 32)) {
-			p = strstr(buf, "expiry:");
-			if (p) {
-				p += 7;
-				expiry = simple_strtoull(p, &end, 0);
-				if (end != p) {
-					do_restore(hash, expiry);
-				}
-			}
-		}
-	}
+	/* Older state files were only written for PGP sessions and lack the
+	 * field, so a missing field means PGP. */
+	p = strstr(head, "pgp_active:");
+	if (p && p[11] == '0')
+		pgp = false;
 
-	p = strstr(buf, "pgp_active:");
-	if (p && READ_ONCE(state_restored)) {
-		p += 11;
-		if (*p == '1') {
-			WRITE_ONCE(pgp_active, true);
-			memzero_explicit(unload_key, sizeof(unload_key));
-			printk(KERN_DEBUG "kblocker: PGP mode restored from disk\n");
-		}
-	}
-
-	kfree(buf);
 	filp_close(file, NULL);
+	file = NULL;
+
+	memcpy(key_hash, hash, sizeof(key_hash));
+	memzero_explicit(unload_key, sizeof(unload_key));
+	memzero_explicit(pgp_key, sizeof(pgp_key));
+	pgp_key_consumed = true;
+	WRITE_ONCE(pgp_active, pgp);
+	WRITE_ONCE(state_restored, true);
+	start_session(rem);
+	printk(KERN_INFO "kblocker: state restored, %llu seconds remaining\n", rem);
+out:
+	memzero_explicit(hash, sizeof(hash));
+	kfree(tail);
+	kvfree(head);
+	if (file)
+		filp_close(file, NULL);
 }

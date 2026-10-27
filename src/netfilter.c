@@ -10,10 +10,19 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/spinlock.h>
-#include <linux/version.h>
+#include <net/ip.h>
 #include <net/ipv6.h>
 #include <net/tcp.h>
 #include "kblocker.h"
+
+/* TLS record header (5) + maximum plaintext record (16 KiB) */
+#define TLS_MAX_RECORD (5 + 16384)
+#define TLS_EXT_SERVER_NAME 0x0000
+
+static struct nf_hook_ops nfho_out;
+static struct nf_hook_ops nfho_forward;
+static bool out_registered;
+static bool forward_registered;
 
 static bool is_ip_blocked(__be32 addr)
 {
@@ -33,7 +42,7 @@ static bool is_ip_blocked(__be32 addr)
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
-static bool is_ipv6_blocked(struct in6_addr *addr)
+static bool is_ipv6_blocked(const struct in6_addr *addr)
 {
 	int i;
 	bool found = false;
@@ -51,283 +60,279 @@ static bool is_ipv6_blocked(struct in6_addr *addr)
 }
 #endif
 
+/* @host equals @blocked, or ends in "." + @blocked (so x.com blocks
+ * www.x.com but not netflix.com) */
+static bool domain_matches(const char *host, size_t hlen, const char *blocked)
+{
+	size_t blen = strlen(blocked);
+
+	if (!blen || hlen < blen)
+		return false;
+	if (strncasecmp(host + hlen - blen, blocked, blen))
+		return false;
+	return hlen == blen || host[hlen - blen - 1] == '.';
+}
+
 static bool domain_list_contains(const char *hostname)
 {
-	int i;
+	size_t hlen = strlen(hostname);
 	bool found = false;
+	int i;
+
+	while (hlen && hostname[hlen - 1] == '.')
+		hlen--;
 
 	spin_lock_bh(&ip_list_lock);
-	if (!blocked_domain_count)
-		goto out;
-	for (i = 0; i < blocked_domain_count; i++) {
-		const char *blocked = blocked_domains[i];
-		int blen = strlen(blocked);
-		const char *p = hostname;
-		while (*p) {
-			if (strncasecmp(p, blocked, blen) == 0) {
-				found = true;
-				goto out;
-			}
-			p++;
-		}
-	}
-out:
+	for (i = 0; i < blocked_domain_count && !found; i++)
+		found = domain_matches(hostname, hlen, blocked_domains[i]);
 	spin_unlock_bh(&ip_list_lock);
 	return found;
 }
 
-static bool sni_matches_blocked(const struct sk_buff *skb, struct tcphdr *tcph)
+static u16 get_u16(const u8 *p)
 {
-	int thlen = tcph->doff * 4;
-	const u8 *data;
-	int data_len, offset;
+	return (p[0] << 8) | p[1];
+}
 
-	data = (u8 *)tcph + thlen;
-	data_len = skb->len - (int)((u8 *)tcph - skb->data) - thlen;
+/*
+ * @data holds @len bytes starting at a TLS handshake record. Returns true
+ * if the ClientHello carries a server_name that is blocked.
+ *
+ * Encrypted Client Hello (0xfe0d) is not treated specially: its outer
+ * server_name (the provider's public name) is still matched, and ECH
+ * hellos are not dropped wholesale because browsers send GREASE ECH
+ * extensions on ordinary connections.
+ */
+static bool sni_matches_blocked(const u8 *data, int len)
+{
+	int off, end, ext_end;
 
-	if (data_len < 6)
+	if (len < 9 || data[0] != 0x16 || data[5] != 0x01)
 		return false;
-	if (data[0] != 0x16) {
+
+	/* record(5) + handshake type(1) + length(3) + version(2) + random(32) */
+	off = 5 + 4 + 2 + 32;
+	if (off + 1 > len)
 		return false;
-	}
-	if (data[5] != 0x01) {
+	off += 1 + data[off];			/* session id */
+	if (off + 2 > len)
 		return false;
-	}
-
-	offset = 5 + 4;
-	if (offset + 34 > data_len)
+	off += 2 + get_u16(data + off);		/* cipher suites */
+	if (off + 1 > len)
 		return false;
-	offset += 2;
-	offset += 32;
-
-	if (offset + 1 > data_len)
+	off += 1 + data[off];			/* compression methods */
+	if (off + 2 > len)
 		return false;
-	offset += 1 + data[offset];
+	ext_end = off + 2 + get_u16(data + off);
+	off += 2;
+	end = min(len, ext_end);
 
-	if (offset + 2 > data_len)
-		return false;
-	offset += 2 + (data[offset] << 8 | data[offset + 1]);
+	while (off + 4 <= end) {
+		int type = get_u16(data + off);
+		int ext_len = get_u16(data + off + 2);
 
-	if (offset + 1 > data_len)
-		return false;
-	offset += 1 + data[offset];
+		off += 4;
+		if (off + ext_len > end)
+			return false;
 
-	if (offset + 2 > data_len)
-		return false;
-	{
-		int ext_total = (data[offset] << 8) | data[offset + 1];
-		offset += 2;
+		if (type == TLS_EXT_SERVER_NAME) {
+			/* list length(2), name type(1), name length(2) */
+			int name_len;
+			char sni[MAX_DOMAIN_LEN];
 
-		while (offset + 4 <= data_len && ext_total > 0) {
-			int ext_type = (data[offset] << 8) | data[offset + 1];
-			int ext_len = (data[offset + 2] << 8) | data[offset + 3];
-			offset += 4;
-			ext_total -= 4;
-
-			if (ext_type == 0xFE0A) {
-				return true;
-			}
-			if (ext_type == 0x0000) {
-				if (offset + 3 > data_len)
-					return false;
-				offset += 2;
-				if (data[offset] != 0x00)
-					return false;
-				offset += 1;
-				if (offset + 2 > data_len)
-					return false;
-				int name_len = (data[offset] << 8) | data[offset + 1];
-				offset += 2;
-
-				if (name_len > 0 && offset + name_len <= data_len) {
-					char sni_buf[MAX_DOMAIN_LEN];
-					int copy_len = min(name_len, (int)sizeof(sni_buf) - 1);
-					memcpy(sni_buf, data + offset, copy_len);
-					sni_buf[copy_len] = '\0';
-					return domain_list_contains(sni_buf);
-				}
+			if (ext_len < 5 || data[off + 2] != 0x00)
 				return false;
-			}
-			offset += ext_len;
-			ext_total -= ext_len;
+			name_len = get_u16(data + off + 3);
+			if (name_len <= 0 || name_len >= sizeof(sni) ||
+			    5 + name_len > ext_len)
+				return false;
+			memcpy(sni, data + off + 5, name_len);
+			sni[name_len] = '\0';
+			return domain_list_contains(sni);
 		}
+		off += ext_len;
 	}
 	return false;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
-unsigned int kblocker_hook(void *priv, struct sk_buff *skb,
-				     const struct nf_hook_state *state)
-#else
-unsigned int kblocker_hook(unsigned int hooknum, struct sk_buff *skb,
-				     const struct net_device *in, const struct net_device *out,
-				     int (*okfn)(struct sk_buff *))
-#endif
+/* @thoff is the offset of the TCP header within @skb */
+static unsigned int inspect_tcp(struct sk_buff *skb, unsigned int thoff)
 {
-	if (!READ_ONCE(enabled)) return NF_ACCEPT;
-	if (!skb) return NF_ACCEPT;
+	struct tcphdr _th;
+	const struct tcphdr *th;
+	u8 _hdr[6];
+	const u8 *hdr;
+	unsigned int doff, copy;
+	u8 *buf;
+	bool match;
+
+	th = skb_header_pointer(skb, thoff, sizeof(_th), &_th);
+	if (!th || th->rst || th->doff < 5)
+		return NF_ACCEPT;
+
+	/* Includes SYN packets: TCP Fast Open carries data in the SYN */
+	doff = thoff + th->doff * 4;
+	if (doff >= skb->len)
+		return NF_ACCEPT;
+
+	hdr = skb_header_pointer(skb, doff, sizeof(_hdr), _hdr);
+	if (!hdr || hdr[0] != 0x16 || hdr[5] != 0x01)
+		return NF_ACCEPT;
+
+	/* Copy the ClientHello out of the (possibly paged) skb, bounded by
+	 * what is actually present. */
+	copy = min_t(unsigned int, skb->len - doff, 5 + get_u16(hdr + 3));
+	copy = min_t(unsigned int, copy, TLS_MAX_RECORD);
+	buf = kmalloc(copy, GFP_ATOMIC);
+	if (!buf)
+		return NF_ACCEPT;
+	if (skb_copy_bits(skb, doff, buf, copy)) {
+		kfree(buf);
+		return NF_ACCEPT;
+	}
+	match = sni_matches_blocked(buf, copy);
+	kfree(buf);
+	return match ? NF_DROP : NF_ACCEPT;
+}
+
+/* QUIC carries its ClientHello encrypted, so while domains are blocked all
+ * UDP/443 is dropped and browsers fall back to TCP, where SNI is visible. */
+static unsigned int inspect_udp(struct sk_buff *skb, unsigned int thoff)
+{
+	struct udphdr _uh;
+	const struct udphdr *uh;
+
+	uh = skb_header_pointer(skb, thoff, sizeof(_uh), &_uh);
+	if (uh && uh->dest == htons(443))
+		return NF_DROP;
+	return NF_ACCEPT;
+}
+
+static unsigned int kblocker_hook_v4(struct sk_buff *skb)
+{
+	struct iphdr _iph;
+	const struct iphdr *iph;
+	unsigned int noff = skb_network_offset(skb), thoff;
+
+	iph = skb_header_pointer(skb, noff, sizeof(_iph), &_iph);
+	if (!iph || iph->ihl < 5)
+		return NF_ACCEPT;
+
+	if (READ_ONCE(blocked_count_v4) && is_ip_blocked(iph->daddr))
+		return NF_DROP;
+
+	if (!READ_ONCE(blocked_domain_count))
+		return NF_ACCEPT;
+	/* Non-first fragments carry no transport header */
+	if (iph->frag_off & htons(IP_OFFSET))
+		return NF_ACCEPT;
+
+	thoff = noff + iph->ihl * 4;
+	if (iph->protocol == IPPROTO_TCP)
+		return inspect_tcp(skb, thoff);
+	if (iph->protocol == IPPROTO_UDP)
+		return inspect_udp(skb, thoff);
+	return NF_ACCEPT;
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+static unsigned int kblocker_hook_v6(struct sk_buff *skb)
+{
+	struct ipv6hdr _ip6h;
+	const struct ipv6hdr *ip6h;
+	unsigned int noff = skb_network_offset(skb);
+	__be16 frag_off;
+	u8 nexthdr;
+	int thoff;
+
+	ip6h = skb_header_pointer(skb, noff, sizeof(_ip6h), &_ip6h);
+	if (!ip6h)
+		return NF_ACCEPT;
+
+	if (READ_ONCE(blocked_count_v6) && is_ipv6_blocked(&ip6h->daddr))
+		return NF_DROP;
+
+	if (!READ_ONCE(blocked_domain_count))
+		return NF_ACCEPT;
+
+	/* Walk extension headers to the transport header */
+	nexthdr = ip6h->nexthdr;
+	thoff = ipv6_skip_exthdr(skb, noff + sizeof(*ip6h), &nexthdr, &frag_off);
+	if (thoff < 0 || (frag_off & htons(~0x7)))
+		return NF_ACCEPT;
+
+	if (nexthdr == IPPROTO_TCP)
+		return inspect_tcp(skb, thoff);
+	if (nexthdr == IPPROTO_UDP)
+		return inspect_udp(skb, thoff);
+	return NF_ACCEPT;
+}
+#endif
+
+static unsigned int kblocker_hook(void *priv, struct sk_buff *skb,
+				  const struct nf_hook_state *state)
+{
+	if (!READ_ONCE(enabled) || !skb)
+		return NF_ACCEPT;
 
 	if (state->pf == NFPROTO_IPV4)
-		return kblocker_hook_v4(priv, skb, state);
+		return kblocker_hook_v4(skb);
 #if IS_ENABLED(CONFIG_IPV6)
 	if (state->pf == NFPROTO_IPV6)
-		return kblocker_hook_v6(priv, skb, state);
+		return kblocker_hook_v6(skb);
 #endif
 	return NF_ACCEPT;
 }
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
-unsigned int kblocker_hook_v4(void *priv, struct sk_buff *skb,
-				    const struct nf_hook_state *state)
-#else
-unsigned int kblocker_hook_v4(unsigned int hooknum, struct sk_buff *skb,
-				    const struct net_device *in, const struct net_device *out,
-				    int (*okfn)(struct sk_buff *))
-#endif
-{
-	struct iphdr *iph;
-	struct tcphdr *tcph;
-
-	if (READ_ONCE(blocked_count_v4)) {
-		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
-			return NF_ACCEPT;
-		iph = ip_hdr(skb);
-		if (!iph) return NF_ACCEPT;
-		if (is_ip_blocked(iph->daddr))
-			return NF_DROP;
-	}
-
-	if (READ_ONCE(blocked_domain_count)) {
-		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
-			return NF_ACCEPT;
-		iph = ip_hdr(skb);
-		if (!iph) return NF_ACCEPT;
-		if (iph->protocol == IPPROTO_UDP) {
-			int ip_hdr_len = iph->ihl * 4;
-			if (pskb_may_pull(skb, ip_hdr_len + sizeof(struct udphdr))) {
-				iph = ip_hdr(skb);
-				struct udphdr *udph = (void *)iph + ip_hdr_len;
-				if (udph->dest == htons(443))
-					return NF_DROP;
-			}
-			return NF_ACCEPT;
-		}
-		if (iph->protocol != IPPROTO_TCP)
-			return NF_ACCEPT;
-		int ip_hdr_len = iph->ihl * 4;
-		if (!pskb_may_pull(skb, ip_hdr_len + sizeof(struct tcphdr)))
-			return NF_ACCEPT;
-		iph = ip_hdr(skb);
-		tcph = (void *)iph + ip_hdr_len;
-		if (tcph->syn || !tcph->ack || tcph->rst)
-			return NF_ACCEPT;
-		int tcp_data_off = ip_hdr_len + (tcph->doff * 4);
-		int sni_pull = tcp_data_off + 512;
-		if (sni_pull > skb->len)
-			sni_pull = skb->len;
-		if (!pskb_may_pull(skb, sni_pull))
-			return NF_ACCEPT;
-		iph = ip_hdr(skb);
-		tcph = (void *)iph + ip_hdr_len;
-		if (sni_matches_blocked(skb, tcph))
-			return NF_DROP;
-	}
-
-	return NF_ACCEPT;
-}
-
-#if IS_ENABLED(CONFIG_IPV6)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
-unsigned int kblocker_hook_v6(void *priv, struct sk_buff *skb,
-				    const struct nf_hook_state *state)
-#else
-unsigned int kblocker_hook_v6(unsigned int hooknum, struct sk_buff *skb,
-				    const struct net_device *in, const struct net_device *out,
-				    int (*okfn)(struct sk_buff *))
-#endif
-{
-	struct ipv6hdr *ip6h;
-	struct tcphdr *tcph;
-
-	if (!READ_ONCE(enabled)) return NF_ACCEPT;
-
-	if (READ_ONCE(blocked_count_v6)) {
-		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
-			return NF_ACCEPT;
-		ip6h = ipv6_hdr(skb);
-		if (!ip6h) return NF_ACCEPT;
-		if (is_ipv6_blocked(&ip6h->daddr))
-			return NF_DROP;
-	}
-
-	if (READ_ONCE(blocked_domain_count)) {
-		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
-			return NF_ACCEPT;
-		ip6h = ipv6_hdr(skb);
-		if (!ip6h) return NF_ACCEPT;
-
-		u8 nexthdr = ip6h->nexthdr;
-		int hdr_offset = sizeof(struct ipv6hdr);
-
-		if (nexthdr == IPPROTO_UDP) {
-			if (pskb_may_pull(skb, hdr_offset + sizeof(struct udphdr))) {
-				struct udphdr *udph = (struct udphdr *)((u8 *)ipv6_hdr(skb) + hdr_offset);
-				if (udph->dest == htons(443))
-					return NF_DROP;
-			}
-			return NF_ACCEPT;
-		}
-		if (nexthdr != IPPROTO_TCP)
-			return NF_ACCEPT;
-		if (!pskb_may_pull(skb, hdr_offset + sizeof(struct tcphdr)))
-			return NF_ACCEPT;
-		ip6h = ipv6_hdr(skb);
-		tcph = (struct tcphdr *)((u8 *)ip6h + hdr_offset);
-		if (tcph->syn || !tcph->ack || tcph->rst)
-			return NF_ACCEPT;
-		int tcp_data_off = hdr_offset + (tcph->doff * 4);
-		int sni_pull = tcp_data_off + 512;
-		if (sni_pull > skb->len)
-			sni_pull = skb->len;
-		if (!pskb_may_pull(skb, sni_pull))
-			return NF_ACCEPT;
-		ip6h = ipv6_hdr(skb);
-		tcph = (struct tcphdr *)((u8 *)ip6h + hdr_offset);
-		if (sni_matches_blocked(skb, tcph))
-			return NF_DROP;
-	}
-
-	return NF_ACCEPT;
-}
-#endif
 
 void log_blocklist_on_disable(void)
 {
 	int i;
 
-	if (READ_ONCE(blocked_count_v4)) {
-		spin_lock_bh(&ip_list_lock);
+	spin_lock_bh(&ip_list_lock);
+	if (blocked_count_v4) {
 		printk(KERN_DEBUG "kblocker: blocked IPv4 on disable:");
 		for (i = 0; i < blocked_count_v4; i++)
 			printk(KERN_DEBUG "kblocker:   %pI4", &blocked_ips_v4[i]);
-		spin_unlock_bh(&ip_list_lock);
 	}
-
-	if (READ_ONCE(blocked_count_v6)) {
-		spin_lock_bh(&ip_list_lock);
+	if (blocked_count_v6) {
 		printk(KERN_DEBUG "kblocker: blocked IPv6 on disable:");
 		for (i = 0; i < blocked_count_v6; i++)
 			printk(KERN_DEBUG "kblocker:   %pI6", &blocked_ips_v6[i]);
-		spin_unlock_bh(&ip_list_lock);
 	}
-
-	if (READ_ONCE(blocked_domain_count)) {
-		spin_lock_bh(&ip_list_lock);
+	if (blocked_domain_count) {
 		printk(KERN_DEBUG "kblocker: blocked domains on disable:");
 		for (i = 0; i < blocked_domain_count; i++)
 			printk(KERN_DEBUG "kblocker:   %s", blocked_domains[i]);
-		spin_unlock_bh(&ip_list_lock);
 	}
+	spin_unlock_bh(&ip_list_lock);
+}
+
+int kblocker_register_netfilter(void)
+{
+	int ret;
+
+	nfho_out.hook = kblocker_hook;
+	nfho_out.hooknum = NF_INET_LOCAL_OUT;
+	nfho_out.pf = NFPROTO_INET;
+	nfho_out.priority = NF_IP_PRI_FILTER;
+
+	ret = nf_register_net_hook(&init_net, &nfho_out);
+	if (ret) {
+		printk(KERN_ERR "kblocker: failed to register LOCAL_OUT hook\n");
+		return ret;
+	}
+	out_registered = true;
+
+	nfho_forward.hook = kblocker_hook;
+	nfho_forward.hooknum = NF_INET_FORWARD;
+	nfho_forward.pf = NFPROTO_INET;
+	nfho_forward.priority = NF_IP_PRI_FILTER;
+
+	if (nf_register_net_hook(&init_net, &nfho_forward))
+		printk(KERN_WARNING "kblocker: FORWARD hook failed (non-fatal)\n");
+	else
+		forward_registered = true;
+	return 0;
 }
 
 void kblocker_cleanup_netfilter(void)
@@ -336,8 +341,8 @@ void kblocker_cleanup_netfilter(void)
 		nf_unregister_net_hook(&init_net, &nfho_forward);
 		forward_registered = false;
 	}
-	if (ipv4_registered) {
+	if (out_registered) {
 		nf_unregister_net_hook(&init_net, &nfho_out);
-		ipv4_registered = false;
+		out_registered = false;
 	}
 }

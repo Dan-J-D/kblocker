@@ -2,8 +2,6 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -403,18 +401,6 @@ func readKeyFromSysfs() string {
 	return key
 }
 
-func readKeyFromDmesg() string {
-	out, err := exec.Command("dmesg").Output()
-	if err != nil {
-		return ""
-	}
-	re := regexp.MustCompile(`unload key ([0-9a-f]{32})`)
-	matches := re.FindAllStringSubmatch(string(out), -1)
-	if len(matches) > 0 {
-		return matches[len(matches)-1][1]
-	}
-	return ""
-}
 
 func readDomainConfigFile() []string {
 	lines, err := readFileLines(blockedDomainsFile)
@@ -451,75 +437,9 @@ func syncConfigFromKernel() {
 	chattr(blockedDomainsFile, "+i")
 }
 
-func sha256Hex(s string) string {
-	data, err := hex.DecodeString(s)
-	if err != nil {
-		return ""
-	}
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
-}
 
-func stateExpiry(minutes int) int64 {
-	return time.Now().Unix() + int64(minutes)*60
-}
 
-func storeState(hexKey string, expiry int64) error {
-	os.MkdirAll("/var/lib/kblocker", 0755)
-	chattr(stateFile, "-i")
 
-	hashHex := sha256Hex(hexKey)
-	if hashHex == "" {
-		fmt.Fprintf(os.Stderr, "%sWarning: could not compute key hash for state persistence%s\n", colorYellow, colorNC)
-		return fmt.Errorf("hash computation failed")
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("key_hash:%s\n", hashHex))
-	sb.WriteString(fmt.Sprintf("expiry:%d\n", expiry))
-
-	domains, err := readSysfs(sysfsBase + "/blocked_domains")
-	if err == nil && domains != "" {
-		domains = strings.ReplaceAll(strings.TrimSpace(domains), "\n", ",")
-		sb.WriteString(fmt.Sprintf("domains:%s\n", domains))
-	}
-
-	ips, err := readSysfs(sysfsBase + "/blocked_ips")
-	if err == nil && ips != "" {
-		ips = strings.ReplaceAll(strings.TrimSpace(ips), "\n", ",")
-		sb.WriteString(fmt.Sprintf("blocked_ips:%s\n", ips))
-	}
-
-	if err := os.WriteFile(stateFile, []byte(sb.String()), 0600); err != nil {
-		return err
-	}
-	chattr(stateFile, "+i")
-	return nil
-}
-
-func restoreStateFromFile() bool {
-	data, err := os.ReadFile(stateFile)
-	if err != nil {
-		return false
-	}
-	lines := strings.Split(string(data), "\n")
-	var hashHex, expiry string
-	for _, line := range lines {
-		if strings.HasPrefix(line, "key_hash:") {
-			hashHex = strings.TrimPrefix(line, "key_hash:")
-		}
-		if strings.HasPrefix(line, "expiry:") {
-			expiry = strings.TrimPrefix(line, "expiry:")
-		}
-	}
-	if hashHex == "" || expiry == "" {
-		return false
-	}
-	if err := writeSysfs(sysfsBase+"/restore", hashHex+":"+expiry); err != nil {
-		return false
-	}
-	return true
-}
 
 func resolveToIPs(domain string) []string {
 	out, err := exec.Command("getent", "ahosts", domain).Output()
@@ -615,9 +535,6 @@ func doEnable(args []string) {
 	}
 
 	hexKey := readKeyFromSysfs()
-	if hexKey == "" {
-		hexKey = readKeyFromDmesg()
-	}
 
 	if hexKey == "" {
 		fmt.Printf("%sWarning: could not read unload key.%s\n", colorYellow, colorNC)
@@ -676,12 +593,6 @@ func doEnable(args []string) {
 		}
 	}
 
-	if !insecure && hexKey != "" {
-		expiry := stateExpiry(minutes)
-		if err := storeState(hexKey, expiry); err == nil {
-			fmt.Printf("%sState saved (survives reboot).%s\n", colorGreen, colorNC)
-		}
-	}
 
 	fmt.Printf("%sBlocking enabled for %d minutes.%s\n", colorGreen, minutes, colorNC)
 }
@@ -868,15 +779,11 @@ func doUnload(args []string) {
 		}
 
 		if key == "" {
-			fmt.Printf("%sUnload key not found. Checking dmesg...%s\n", colorYellow, colorNC)
-			key = readKeyFromDmesg()
-			if key == "" {
-				fmt.Fprintf(os.Stderr, "%sCould not find unload key.%s\n", colorRed, colorNC)
-				fmt.Fprintln(os.Stderr, "  Provide it via --key <hex> or ensure the PGP-encrypted")
-				fmt.Fprintf(os.Stderr, "  key is available in %s\n", pgpEncDir)
-				fmt.Fprintln(os.Stderr, "  Or reboot to force-remove the module.")
-				os.Exit(1)
-			}
+			fmt.Fprintf(os.Stderr, "%sCould not find unload key.%s\n", colorRed, colorNC)
+			fmt.Fprintln(os.Stderr, "  Provide it via --key <hex> or ensure the PGP-encrypted")
+			fmt.Fprintf(os.Stderr, "  key is available in %s\n", pgpEncDir)
+			fmt.Fprintln(os.Stderr, "  Or reboot to force-remove the module.")
+			os.Exit(1)
 		}
 	}
 
@@ -1036,9 +943,6 @@ func doReload() {
 	if numPGP > 0 {
 		hexKey := readKeyFromSysfs()
 		if hexKey == "" {
-			hexKey = readKeyFromDmesg()
-		}
-		if hexKey == "" {
 			fmt.Printf("%sWarning: no unload key available to re-encrypt.%s\n", colorYellow, colorNC)
 			goto skipEnc
 		}
@@ -1064,10 +968,6 @@ func doReload() {
 		}
 	}
 skipEnc:
-
-	if restoreStateFromFile() {
-		fmt.Printf("%sBlocking state restored from disk.%s\n", colorGreen, colorNC)
-	}
 
 	fmt.Printf("%sReload complete.%s\n", colorGreen, colorNC)
 }
@@ -1194,9 +1094,6 @@ func doKey() {
 
 	hexKey := readKeyFromSysfs()
 	if hexKey == "" {
-		hexKey = readKeyFromDmesg()
-	}
-	if hexKey == "" {
 		entries, _ := os.ReadDir(pgpEncDir)
 		for _, e := range entries {
 			if strings.HasPrefix(e.Name(), "unlock-") && strings.HasSuffix(e.Name(), ".asc") {
@@ -1295,9 +1192,6 @@ func doAddPGP(args []string) {
 
 	if moduleLoaded() {
 		hexKey := readKeyFromSysfs()
-		if hexKey == "" {
-			hexKey = readKeyFromDmesg()
-		}
 		if hexKey != "" {
 			fmt.Printf("%sEncrypting existing key for new recipient...%s\n", colorCyan, colorNC)
 			os.MkdirAll(pgpEncDir, 0755)
@@ -2046,10 +1940,7 @@ func addKey(w http.ResponseWriter, r *http.Request) {
 	keyRaw := strings.TrimSpace(string(keyStatus))
 	if moduleLoaded() && keyRaw != "" && keyRaw != "encrypted" && keyRaw != "restored" {
 		hexKey := keyRaw
-		if len(hexKey) != 32 {
-			hexKey = readKeyFromDmesg()
-		}
-		if hexKey != "" && len(hexKey) == 32 {
+		if len(hexKey) == 32 {
 			os.MkdirAll(pgpEncDir, 0755)
 			outPath := filepath.Join(pgpEncDir, "unlock-"+fp+".asc")
 			encCmd := exec.Command("gpg", "--yes", "--trust-model=always", "--encrypt", "--armor",
@@ -2130,9 +2021,6 @@ func handleAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	key := readKeyFromSysfs()
 	if key == "" {
-		key = readKeyFromDmesg()
-	}
-	if key == "" {
 		entries, _ := os.ReadDir(pgpEncDir)
 		for _, e := range entries {
 			if strings.HasPrefix(e.Name(), "unlock-") && strings.HasSuffix(e.Name(), ".asc") {
@@ -2156,9 +2044,6 @@ func handleAPIRefreshEnc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hexKey := readKeyFromSysfs()
-	if hexKey == "" {
-		hexKey = readKeyFromDmesg()
-	}
 	if hexKey == "" {
 		http.Error(w, "No unload key available", http.StatusNotFound)
 		return

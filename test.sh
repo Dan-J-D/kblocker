@@ -89,41 +89,63 @@ check grep -q '^protected_files:' <<<"$STATUS"
 # --- file protection ---
 echo "--- file protection ---"
 
-KO_FILE="/lib/modules/$(uname -r)/extra/kblocker.ko"
-if [[ -f "$KO_FILE" ]] && command -v lsattr &>/dev/null; then
-    ATTRS=$(lsattr "$KO_FILE" 2>/dev/null | awk '{print $1}')
-    if echo "$ATTRS" | grep -q 'i'; then
-        ok "protection: kblocker.ko is immutable"
-    fi
-fi
-if [[ -f "$KO_FILE" ]]; then
-    if echo "x" > "$KO_FILE" 2>/dev/null; then
-        fail "protection: kblocker.ko write should be rejected"
-    else
-        ok "protection: kblocker.ko write rejected"
-    fi
-fi
-
-CFG_FILE="/etc/modules-load.d/kblocker.conf"
-if [[ -f "$CFG_FILE" ]] && command -v lsattr &>/dev/null; then
-    ATTRS=$(lsattr "$CFG_FILE" 2>/dev/null | awk '{print $1}')
-    if echo "$ATTRS" | grep -q 'i'; then
-        ok "protection: kblocker.conf is immutable"
-    fi
-fi
-if [[ -f "$CFG_FILE" ]]; then
-    if echo "x" > "$CFG_FILE" 2>/dev/null; then
-        fail "protection: kblocker.conf write should be rejected"
-    else
-        ok "protection: kblocker.conf write rejected"
-    fi
-fi
-
-if echo "x" >> /etc/hosts 2>/dev/null; then
-    fail "protection: /etc/hosts write should be rejected"
+# Disabled: protected files stay writable (package upgrades, manual edits)
+if echo "# kblocker-test-line" >> /etc/hosts 2>/dev/null; then
+    ok "protection: /etc/hosts writable while disabled"
+    sed -i '/^# kblocker-test-line$/d' /etc/hosts
 else
-    ok "protection: /etc/hosts write rejected"
+    fail "protection: /etc/hosts should be writable while disabled"
 fi
+
+echo "1" > "$SYSFS/pgp_active" 2>/dev/null
+echo "60" > "$SYSFS/enabled"
+PROT_KEY=$(cat "$SYSFS/key")
+if grep -q '^protected_files: 0$' < "$SYSFS/status"; then
+    fail "protection: no files protected while enabled"
+else
+    ok "protection: files protected while enabled"
+fi
+
+for f in "/lib/modules/$(uname -r)/extra/kblocker.ko" /etc/modules-load.d/kblocker.conf /etc/hosts; do
+    [[ -f "$f" ]] || continue
+    if echo "x" >> "$f" 2>/dev/null; then
+        fail "protection: write to $f should be rejected"
+    else
+        ok "protection: write to $f rejected"
+    fi
+    if command -v chattr &>/dev/null; then
+        if chattr -i "$f" 2>/dev/null && echo "x" >> "$f" 2>/dev/null; then
+            fail "protection: chattr -i on $f should be rejected"
+        else
+            ok "protection: chattr -i on $f rejected"
+        fi
+    fi
+    if cp "$f" "$TMPDIR/prot-copy" && rm -f "$f" 2>/dev/null && [[ ! -e "$f" ]]; then
+        fail "protection: rm $f should be rejected"
+        cp "$TMPDIR/prot-copy" "$f"
+    else
+        ok "protection: rm $f rejected"
+    fi
+done
+
+echo -n "$PROT_KEY" > "$SYSFS/disable"
+check grep -q '^enabled: 0$' < "$SYSFS/status"
+check grep -q '^protected_files: 0$' < "$SYSFS/status"
+if echo "# kblocker-test-line" >> /etc/hosts 2>/dev/null; then
+    ok "protection: /etc/hosts writable again after disable"
+    sed -i '/^# kblocker-test-line$/d' /etc/hosts
+else
+    fail "protection: /etc/hosts should be writable after disable"
+fi
+
+# Removed interfaces must stay removed
+for attr in restore update_hosts; do
+    if [[ -e "$SYSFS/$attr" ]]; then
+        fail "sysfs: $attr attribute should not exist"
+    else
+        ok "sysfs: no $attr attribute"
+    fi
+done
 
 # --- key ---
 echo "--- key ---"
@@ -414,7 +436,7 @@ echo "" > "$SYSFS/blocked_domains"
 rm -f "$QUIC_OUT"
 
 # ==========================================
-# --- TLS ECH (0xFE0A) blocking ---
+# --- TLS ECH (0xFE0D): outer SNI is matched ---
 echo "--- TLS ECH blocking ---"
 rmmod $MODULE 2>/dev/null || true
 insmod kblocker.ko 2>/dev/null
@@ -456,13 +478,17 @@ s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.settimeout(2)
 try:
     s.connect(('127.0.0.2', 9996))
-    if mode == 'ech':
+    if mode in ('ech', 'ech-other'):
+        name = b'test-ech.com' if mode == 'ech' else b'example.org'
+        sni = struct.pack('!HBH', len(name) + 3, 0, len(name)) + name
+        exts = struct.pack('!HH', 0xFE0D, 4) + b'\x00\x01\x02\x03'
+        exts += struct.pack('!HH', 0, len(sni)) + sni
         body  = struct.pack('!H', 0x0303)
         body += b'\x01' * 32
         body += struct.pack('B', 0)
         body += struct.pack('!H', 2) + b'\x00\x2f'
         body += b'\x01\x00'
-        body += struct.pack('!H', 4) + struct.pack('!HH', 0xFE0A, 0)
+        body += struct.pack('!H', len(exts)) + exts
         hs  = bytes([0x01]) + struct.pack('!I', len(body))[1:]
         rec = bytes([0x16]) + struct.pack('!HH', 0x0301, len(hs + body))
         s.send(rec + hs + body)
@@ -504,10 +530,14 @@ ech_round "ECH" "plain" "pass"
 echo "10" > "$SYSFS/enabled"
 ech_round "ECH" "plain" "pass"
 
-# 3) Send TLS ClientHello with ECH — should be dropped
+# 3) ClientHello with ECH whose outer SNI is blocked — dropped
 ech_round "ECH" "ech" "blocked"
 
-# 4) Disable — ECH should pass again
+# 4) ECH (or GREASE ECH) with an unblocked outer SNI — must pass
+> "$ECH_OUT"
+ech_round "ECH other" "ech-other" "pass"
+
+# 5) Disable — ECH should pass again
 echo "0" > "$SYSFS/enabled"
 ech_round "ECH" "ech" "pass"
 
@@ -677,8 +707,9 @@ chattr -i /var/lib/kblocker/state 2>/dev/null || true; rm -f /var/lib/kblocker/s
 insmod kblocker.ko 2>/dev/null
 
 HOSTS_MARKER="# kblocker managed entries"
+HOSTS_BEFORE=$(cat /etc/hosts)
 echo "test-blocked.com" > "$SYSFS/blocked_domains"
-echo 1 > "$SYSFS/update_hosts" 2>/dev/null
+echo "30" > "$SYSFS/enabled"
 if grep -q "$HOSTS_MARKER" /etc/hosts; then
     ok "hosts: kernel wrote kblocker entries to /etc/hosts"
 else
@@ -696,10 +727,14 @@ else
 fi
 
 # --- hosts file line integrity (no truncation) ---
-echo "" > "$SYSFS/blocked_domains"
-echo 1 > "$SYSFS/update_hosts" 2>/dev/null
+echo "0" > "$SYSFS/enabled"
+if [[ "$(cat /etc/hosts)" == "$HOSTS_BEFORE" ]]; then
+    ok "hosts: original contents intact after disable"
+else
+    fail "hosts: original contents changed by enable/disable"
+fi
 echo "integrity-check-domain.com" > "$SYSFS/blocked_domains"
-echo 1 > "$SYSFS/update_hosts" 2>/dev/null
+echo "30" > "$SYSFS/enabled"
 TRUNC=0
 EXPECTED_LINES=(
     "0.0.0.0 integrity-check-domain.com"
@@ -733,13 +768,13 @@ if [[ "$TRUNC" -eq 0 ]]; then
     ok "hosts: no truncation artifacts detected"
 fi
 
-# Clearing domains should also trigger cleanup
+# Disabling removes the entries
+echo "0" > "$SYSFS/enabled"
 echo "" > "$SYSFS/blocked_domains"
-echo 1 > "$SYSFS/update_hosts" 2>/dev/null
 if grep -q "$HOSTS_MARKER" /etc/hosts; then
-    fail "hosts: entries not removed after clearing domains"
+    fail "hosts: entries not removed after disable"
 else
-    ok "hosts: entries removed after clearing domains"
+    ok "hosts: entries removed after disable"
 fi
 
 # --- remaining after enable ---
@@ -797,50 +832,93 @@ else
     fail "module fully removed"
 fi
 
-# --- restore sysfs ---
+# --- restore from state file at load ---
 echo "--- restore ---"
 insmod "$PWD/kblocker.ko" 2>/dev/null
-# New key auto-generated
+echo "restore-test.com" > "$SYSFS/blocked_domains"
+echo "1" > "$SYSFS/pgp_active"
+echo "300" > "$SYSFS/enabled"
 RESTORE_KEY=$(cat "$SYSFS/key")
-RESTORE_HASH=$(printf '%s' "$RESTORE_KEY" | xxd -r -p | sha256sum | cut -d' ' -f1)
-FUTURE=$(( $(date -u +%s) + 300 ))
-# Write hash:expiry to restore
-if printf '%s:%s' "$RESTORE_HASH" "$FUTURE" > "$SYSFS/restore" 2>/dev/null; then
-    ok "restore sysfs accepts hash:expiry"
+check grep -q '^remaining:300$' /var/lib/kblocker/state
+check grep -q '^pgp_active:1$' /var/lib/kblocker/state
+
+# The state file is append-only and unwritable while the session runs
+if rm -f /var/lib/kblocker/state 2>/dev/null && [[ ! -e /var/lib/kblocker/state ]]; then
+    fail "state: rm should be rejected"
 else
-    fail "restore sysfs accepts hash:expiry"
+    ok "state: rm rejected"
 fi
-# Now check state
+if echo "remaining:1" >> /var/lib/kblocker/state 2>/dev/null; then
+    fail "state: append by userspace should be rejected"
+else
+    ok "state: append by userspace rejected"
+fi
+if chattr -a /var/lib/kblocker/state 2>/dev/null; then
+    fail "state: chattr -a should be rejected"
+else
+    ok "state: chattr -a rejected"
+fi
+
+# Wall-clock jumps must not end the session
+NOW=$(date +%s)
+date -s "@$(( NOW + 400 * 24 * 3600 ))" >/dev/null
+sleep 2
+date -s "@$(( NOW + 2 ))" >/dev/null
+if grep -q '^enabled: 1$' < "$SYSFS/status"; then
+    ok "clock: jumping the wall clock forward does not end the session"
+else
+    fail "clock: wall clock jump ended the session"
+fi
+
+# Simulate a reboot: the module is pinned while enabled, so unload it
+# with the key (which truncates the state file), put the file back, and
+# load again — the kernel restores its own state file at load.
+cp /var/lib/kblocker/state "$TMPDIR/state.saved"
+echo -n "$RESTORE_KEY" > "$SYSFS/unblock"
+rmmod $MODULE 2>/dev/null
+cp "$TMPDIR/state.saved" /var/lib/kblocker/state
+insmod "$PWD/kblocker.ko" 2>/dev/null
 STATUS=$(cat "$SYSFS/status")
 check grep -q '^enabled: 1$' <<<"$STATUS"
 check grep -q '^state_restored: 1$' <<<"$STATUS"
-# key should now say "restored"
+check grep -q '^restore-test.com$' < "$SYSFS/blocked_domains"
+check grep -q '^1$' < "$SYSFS/pgp_active"
 if grep -q '^restored$' < "$SYSFS/key"; then
     ok "key sysfs shows 'restored' after state restore"
 else
     fail "key sysfs shows 'restored' after state restore"
 fi
-# remaining should be ~300
 REM=$(cat "$SYSFS/remaining")
 if [[ "$REM" -gt 250 && "$REM" -le 300 ]]; then
     ok "remaining ~300s after restore (got ${REM}s)"
 else
     fail "remaining ~300s after restore (got ${REM}s)"
 fi
-# disable + unload cleanly
-echo 0 > "$SYSFS/pgp_active" 2>/dev/null || true
-echo "0" > "$SYSFS/enabled" 2>/dev/null || true
-sleep 1
+# A restored PGP session needs the original key
+if echo "0" > "$SYSFS/enabled" 2>/dev/null; then
+    fail "restored PGP session disabled without key"
+else
+    ok "restored PGP session refuses keyless disable"
+fi
+echo -n "$RESTORE_KEY" > "$SYSFS/disable"
+check grep -q '^enabled: 0$' < "$SYSFS/status"
+if [[ ! -s /var/lib/kblocker/state ]]; then
+    ok "state: truncated after keyed disable"
+else
+    fail "state: still populated after keyed disable"
+fi
+echo "" > "$SYSFS/blocked_domains"
 rmmod $MODULE 2>/dev/null || rmmod -f $MODULE 2>/dev/null || true
 
-# --- already-expired restore should be rejected ---
+# --- legacy state file with expired wall-clock deadline is ignored ---
 echo "--- restore (already expired) ---"
-chattr -i /var/lib/kblocker/state 2>/dev/null || true; rm -f /var/lib/kblocker/state
+mkdir -p /var/lib/kblocker
+printf 'key_hash:%s\nexpiry:%s\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "$(( $(date -u +%s) - 60 ))" > /var/lib/kblocker/state
 insmod "$PWD/kblocker.ko" 2>/dev/null
-EXPIRED=$(( $(date -u +%s) - 60 ))
-printf '%s:%s' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$EXPIRED" > "$SYSFS/restore" 2>/dev/null
 check grep -q '^enabled: 0$' < "$SYSFS/status"
 rmmod $MODULE 2>/dev/null || rmmod -f $MODULE 2>/dev/null || true
+rm -f /var/lib/kblocker/state
 
 # ==========================================
 echo ""
