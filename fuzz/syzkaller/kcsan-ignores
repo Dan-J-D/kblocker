@@ -49,3 +49,6 @@ KCSAN: data-race in kthread_is_per_cpu\+
 # maple tree: lockless RCU walkers (page faults) check node parent pointers
 # to detect replaced nodes while a writer re-parents them, and retry
 KCSAN: data-race in (mas_topiary_replace|mtree_range_walk) / (mas_topiary_replace|mtree_range_walk)
+# VFS sums the per-CPU nr_inodes counters locklessly for a writeback
+# estimate while other CPUs update theirs; approximate by design
+KCSAN: data-race in get_nr_inodes\+
