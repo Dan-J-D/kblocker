@@ -30,7 +30,10 @@ What the descriptions in `kblocker.txt` exercise:
 The module is built with `KBLOCKER_DEBUG=1` and loaded in the VM with:
 
 - `hook_all_netns=1`, because syz-executor runs every test process in its own
-  network namespace;
+  network namespace. It filters every namespace except the initial one, where
+  the executor talks to syz-manager over loopback: a fuzzed `blocked_ips`
+  entry of `127.0.0.1` would otherwise cut that connection and show up as
+  "no output from test machine";
 - `hosts_file=/dev/kblocker-hosts`, `state_file=/dev/kblocker-state` and
   `modconf_file=/dev/kblocker-modules.conf` (created by a `tmpfiles.d` entry),
   because the executor sandbox only sees `/dev`, `/proc` and `/sys`, so

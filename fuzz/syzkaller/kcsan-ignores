@@ -46,3 +46,6 @@ KCSAN: data-race in delayacct_add_tsk\+
 # load balancing tests PF_KTHREAD while an exiting task sets PF_NOFREEZE in
 # the same flags word; the tested bit does not change
 KCSAN: data-race in kthread_is_per_cpu\+
+# maple tree: lockless RCU walkers (page faults) check node parent pointers
+# to detect replaced nodes while a writer re-parents them, and retry
+KCSAN: data-race in (mas_topiary_replace|mtree_range_walk) / (mas_topiary_replace|mtree_range_walk)

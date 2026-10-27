@@ -30,11 +30,14 @@ static bool forward_registered;
  * By default only the initial network namespace is filtered; traffic from
  * other namespaces reaches the host through FORWARD. Fuzzers such as
  * syzkaller run every test process in a fresh namespace, so they set this
- * to reach the packet parsers.
+ * to reach the packet parsers. It then filters every namespace except the
+ * initial one: syz-executor talks to the fuzzer over loopback there, and a
+ * fuzzed blocked_ips entry such as 127.0.0.1 would cut that connection.
  */
 static bool hook_all_netns;
 module_param(hook_all_netns, bool, 0444);
-MODULE_PARM_DESC(hook_all_netns, "Filter traffic in every network namespace (for fuzzing)");
+MODULE_PARM_DESC(hook_all_netns,
+		 "Filter traffic in every network namespace but the initial one (for fuzzing)");
 static bool pernet_registered;
 
 static bool is_ip_blocked(__be32 addr)
@@ -253,11 +256,15 @@ void log_blocklist_on_disable(void)
 
 static int __net_init kb_net_init(struct net *net)
 {
+	if (net_eq(net, &init_net))
+		return 0;
 	return nf_register_net_hooks(net, kb_ops, ARRAY_SIZE(kb_ops));
 }
 
 static void __net_exit kb_net_exit(struct net *net)
 {
+	if (net_eq(net, &init_net))
+		return;
 	nf_unregister_net_hooks(net, kb_ops, ARRAY_SIZE(kb_ops));
 }
 
@@ -279,7 +286,7 @@ int kblocker_register_netfilter(void)
 	kb_ops[1].hooknum = NF_INET_FORWARD;
 
 	if (hook_all_netns) {
-		/* Also covers init_net */
+		/* Every namespace except init_net, see hook_all_netns */
 		ret = register_pernet_subsys(&kb_net_ops);
 		if (ret)
 			return ret;
