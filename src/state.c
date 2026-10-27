@@ -68,7 +68,7 @@ static void clear_ondisk_flags(const struct path *p)
 	err = vfs_fileattr_set(mnt_idmap(p->mnt), p->dentry, &fa);
 	if (err)
 		printk(KERN_WARNING "kblocker: clearing flags on %s failed: %d\n",
-		       STATE_FILE, err);
+		       kb_state_file, err);
 }
 
 static void state_file_close(void)
@@ -88,13 +88,13 @@ void state_file_clear(void)
 
 	state_file_close();
 
-	if (kern_path(STATE_FILE, LOOKUP_FOLLOW, &p))
+	if (kern_path(kb_state_file, LOOKUP_FOLLOW, &p))
 		return;
 	clear_ondisk_flags(&p);
 	err = vfs_truncate(&p, 0);
 	if (err)
 		printk(KERN_ERR "kblocker: truncating %s failed: %d\n",
-		       STATE_FILE, err);
+		       kb_state_file, err);
 	path_put(&p);
 }
 
@@ -148,22 +148,22 @@ static int state_file_write_session(u64 seconds)
 		len += scnprintf(buf + len, size - len, "\n");
 	}
 
-	if (!kern_path(STATE_FILE, LOOKUP_FOLLOW, &p)) {
+	if (!kern_path(kb_state_file, LOOKUP_FOLLOW, &p)) {
 		clear_ondisk_flags(&p);
 		path_put(&p);
 	}
 
-	f = filp_open(STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0600);
+	f = filp_open(kb_state_file, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0600);
 	if (IS_ERR(f)) {
 		ret = PTR_ERR(f);
-		printk(KERN_ERR "kblocker: cannot open %s: %d\n", STATE_FILE, ret);
+		printk(KERN_ERR "kblocker: cannot open %s: %d\n", kb_state_file, ret);
 		goto out;
 	}
 
 	written = kernel_write(f, buf, len, &pos);
 	if (written != len) {
 		printk(KERN_ERR "kblocker: writing %s failed: %zd\n",
-		       STATE_FILE, written);
+		       kb_state_file, written);
 		filp_close(f, NULL);
 		ret = written < 0 ? written : -EIO;
 		goto out;
@@ -194,6 +194,75 @@ static void state_file_append_remaining(u64 rem)
 		printk(KERN_WARNING "kblocker: saving remaining time failed\n");
 	else
 		vfs_fsync(state_filp, 1);
+}
+
+#ifdef KBLOCKER_DEBUG
+static bool all_zero(const u8 *p, size_t n)
+{
+	while (n--)
+		if (*p++)
+			return false;
+	return true;
+}
+
+/*
+ * Session invariants, checked with kb_lock held whenever a state change
+ * completes. A violation is a bug; under a fuzzer running with
+ * panic_on_warn it becomes a crash report with a reproducer.
+ */
+static void kb_check_invariants(void)
+{
+	char norm[MAX_DOMAIN_LEN];
+	int refs = atomic_read(&ref_taken);
+	int nd, n4, n6, i;
+
+	lockdep_assert_held(&kb_lock);
+
+	WARN_ONCE(enabled != (refs == 1),
+		  "kblocker: enabled=%d but module refs=%d\n", enabled, refs);
+	WARN_ONCE(allow_unload && enabled, "kblocker: unload allowed while enabled\n");
+	WARN_ONCE(enabled && pgp_active && !all_zero(unload_key, sizeof(unload_key)),
+		  "kblocker: raw key in memory during a PGP session\n");
+	WARN_ONCE(state_restored && !(enabled && pgp_active),
+		  "kblocker: restored session is not PGP-locked\n");
+	WARN_ONCE(!pgp_key_consumed && !(enabled && pgp_active),
+		  "kblocker: one-shot key outside a PGP session\n");
+	WARN_ONCE(remaining_seconds() > MAX_SESSION_SECONDS,
+		  "kblocker: remaining %llu exceeds the maximum\n", remaining_seconds());
+	WARN_ONCE(!enabled && expiry_boot, "kblocker: expiry set while disabled\n");
+	WARN_ONCE(!enabled && state_filp, "kblocker: state file open while disabled\n");
+	WARN_ONCE(!enabled && protection_count(),
+		  "kblocker: %d files protected while disabled\n", protection_count());
+
+	spin_lock_bh(&ip_list_lock);
+	nd = blocked_domain_count;
+	n4 = blocked_count_v4;
+	n6 = blocked_count_v6;
+	WARN_ONCE(nd < 0 || nd > MAX_DOMAINS, "kblocker: %d domains\n", nd);
+	WARN_ONCE(n4 < 0 || n4 > MAX_IPS_V4, "kblocker: %d IPv4 entries\n", n4);
+	WARN_ONCE(n6 < 0 || n6 > MAX_IPS_V6, "kblocker: %d IPv6 entries\n", n6);
+	for (i = 0; i < nd && i < MAX_DOMAINS; i++) {
+		const char *d = blocked_domains[i];
+		char *n;
+
+		if (WARN_ONCE(strnlen(d, MAX_DOMAIN_LEN) == MAX_DOMAIN_LEN,
+			      "kblocker: domain %d not terminated\n", i))
+			break;
+		strscpy(norm, d, sizeof(norm));
+		n = kb_normalize_domain(norm);
+		WARN_ONCE(!n || strcmp(n, d),
+			  "kblocker: stored domain '%s' is not normalized\n", d);
+	}
+	spin_unlock_bh(&ip_list_lock);
+}
+#endif
+
+void kb_unlock(void)
+{
+#ifdef KBLOCKER_DEBUG
+	kb_check_invariants();
+#endif
+	mutex_unlock(&kb_lock);
 }
 
 static void stop_session(void)
@@ -288,7 +357,7 @@ static void kb_expire_work_fn(struct work_struct *work)
 	}
 	mod_timer(&enable_timer, jiffies + HZ);
 out:
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 }
 
 static void enable_timer_cb(struct timer_list *t)
@@ -310,7 +379,7 @@ void session_exit(void)
 
 	mutex_lock(&kb_lock);
 	state_file_clear();
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 }
 
 static ssize_t read_at(struct file *f, char *buf, size_t len, loff_t pos)
@@ -321,24 +390,6 @@ static ssize_t read_at(struct file *f, char *buf, size_t len, loff_t pos)
 		return ret;
 	buf[ret] = '\0';
 	return ret;
-}
-
-/* Value of the last complete "remaining:N\n" line in @s, or 0 */
-static u64 last_remaining(const char *s)
-{
-	const char *p = s, *hit;
-	u64 val = 0, v;
-	char *end;
-
-	while ((hit = strstr(p, "remaining:"))) {
-		p = hit + 10;
-		if (hit != s && hit[-1] != '\n')
-			continue;
-		v = simple_strtoull(p, &end, 10);
-		if (end != p && *end == '\n')
-			val = v;
-	}
-	return val;
 }
 
 static void restore_domains(char *buf)
@@ -360,9 +411,10 @@ static void restore_domains(char *buf)
 
 	spin_lock_bh(&ip_list_lock);
 	while ((token = strsep(&copy, ",")) && nd < MAX_DOMAINS) {
-		int dlen = strlen(token);
-		if (dlen > 0 && dlen < MAX_DOMAIN_LEN) {
-			memcpy(blocked_domains[nd], token, dlen + 1);
+		char *d = kb_normalize_domain(token);
+
+		if (d) {
+			strscpy(blocked_domains[nd], d, MAX_DOMAIN_LEN);
 			nd++;
 		}
 	}
@@ -430,7 +482,7 @@ void try_restore_state_from_disk(void)
 	if (enabled || state_restored)
 		return;
 
-	file = filp_open(STATE_FILE, O_RDONLY, 0);
+	file = filp_open(kb_state_file, O_RDONLY, 0);
 	if (IS_ERR(file))
 		return;
 
@@ -455,12 +507,12 @@ void try_restore_state_from_disk(void)
 		goto out;
 	p += 9;
 	end = strchr(p, '\n');
-	if (!end || end - p != 64 || hex_decode(p, hash, 32))
+	if (!end || end - p != 64 || kb_hex_decode(p, hash, 32))
 		goto out;
 
-	rem = last_remaining(tail);
+	rem = kb_last_remaining(tail);
 	if (!rem)
-		rem = last_remaining(head);
+		rem = kb_last_remaining(head);
 	if (!rem) {
 		/* Legacy file written by older kblockerctl: wall-clock deadline */
 		p = strstr(head, "expiry:");

@@ -1,5 +1,11 @@
 obj-m += kblocker.o
-kblocker-objs := src/main.o src/netfilter.o src/file_protection.o src/state.o src/key.o
+kblocker-objs := src/main.o src/netfilter.o src/file_protection.o src/state.o src/key.o src/parse.o
+
+# KBLOCKER_DEBUG=1: invariant checks on every state change and module
+# parameters that relocate the protected files (used by fuzz/syzkaller)
+ifeq ($(KBLOCKER_DEBUG),1)
+ccflags-y += -DKBLOCKER_DEBUG
+endif
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
@@ -49,6 +55,7 @@ deb: kblockerctl
 clean:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
 	rm -f src/*.o src/*.ko src/*.mod.c src/.*.cmd Module.symvers modules.order kblockerctl kfuzz
+	rm -rf tests/proptest/build
 
 install: all
 	@if [ "$(shell id -u)" -ne 0 ]; then \
@@ -132,6 +139,10 @@ uninstall:
 	depmod -a
 	@echo "kblocker uninstalled."
 
+# Property-based tests of src/parse.c under ASan/UBSan (tests/proptest)
+proptest:
+	tests/proptest/run.sh
+
 syz-setup:
 	fuzz/syzkaller/setup.sh all
 
@@ -150,4 +161,4 @@ test:
 %:
 	@:
 
-.PHONY: all clean install uninstall test kblockerctl syz-setup syz-run
+.PHONY: all clean install uninstall test kblockerctl proptest syz-setup syz-run

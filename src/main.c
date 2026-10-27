@@ -5,7 +5,6 @@
 #include <linux/inet.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/ctype.h>
 #include <linux/random.h>
 #include <net/ipv6.h>
 #include "kblocker.h"
@@ -35,6 +34,21 @@ bool pgp_active;
 atomic_t ref_taken = ATOMIC_INIT(0);
 
 struct kobject *kblocker_kobj;
+
+char *kb_hosts_file = "/etc/hosts";
+char *kb_state_file = "/var/lib/kblocker/state";
+char *kb_modconf_file = "/etc/modules-load.d/kblocker.conf";
+
+#ifdef KBLOCKER_DEBUG
+/* Debug builds only: in a release build these would let root point the
+ * state file elsewhere via modprobe.d and skip restore after a reboot. */
+module_param_named(hosts_file, kb_hosts_file, charp, 0444);
+module_param_named(state_file, kb_state_file, charp, 0444);
+module_param_named(modconf_file, kb_modconf_file, charp, 0444);
+MODULE_PARM_DESC(hosts_file, "Hosts file to manage (debug builds only)");
+MODULE_PARM_DESC(state_file, "Session state file (debug builds only)");
+MODULE_PARM_DESC(modconf_file, "modules-load.d entry to protect (debug builds only)");
+#endif
 
 /* Copy the domain list; returns the number of entries copied */
 int snapshot_domains(char (*dst)[MAX_DOMAIN_LEN])
@@ -105,7 +119,7 @@ static ssize_t enabled_store(struct kobject *kobj, struct kobj_attribute *attr,
 		 * until the session ends. */
 		ret = enable_blocking(val);
 	}
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 
 	return ret ? ret : count;
 }
@@ -175,7 +189,7 @@ static ssize_t blocked_ips_store(struct kobject *kobj, struct kobj_attribute *at
 		WRITE_ONCE(blocked_count_v6, n6);
 		spin_unlock_bh(&ip_list_lock);
 	}
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 out:
 	kfree(tmp_v4);
 	kfree(tmp_v6);
@@ -193,35 +207,6 @@ static ssize_t blocked_domains_show(struct kobject *kobj, struct kobj_attribute 
 		len += sysfs_emit_at(buf, len, "%s\n", blocked_domains[i]);
 	spin_unlock_bh(&ip_list_lock);
 	return len;
-}
-
-/*
- * Normalize a domain in place: lowercase, no leading "*." or "." and no
- * trailing ".". Returns the start of the result, or NULL if it is not a
- * plausible hostname (empty, too long, or containing separators used by
- * the state file and hosts file).
- */
-static char *normalize_domain(char *d)
-{
-	char *p;
-	size_t len;
-
-	d = strim(d);
-	if (!strncmp(d, "*.", 2))
-		d += 2;
-	while (*d == '.')
-		d++;
-	len = strlen(d);
-	while (len && d[len - 1] == '.')
-		d[--len] = '\0';
-	if (!len || len >= MAX_DOMAIN_LEN)
-		return NULL;
-	for (p = d; *p; p++) {
-		if (!isalnum(*p) && *p != '-' && *p != '.' && *p != '_')
-			return NULL;
-		*p = tolower(*p);
-	}
-	return d;
 }
 
 static ssize_t blocked_domains_store(struct kobject *kobj, struct kobj_attribute *attr,
@@ -244,7 +229,7 @@ static ssize_t blocked_domains_store(struct kobject *kobj, struct kobj_attribute
 	while ((token = strsep(&copy, "\n"))) {
 		if (strim(token)[0] == '\0' || strim(token)[0] == '#')
 			continue;
-		d = normalize_domain(token);
+		d = kb_normalize_domain(token);
 		if (!d || nd >= MAX_DOMAINS) {
 			ret = -EINVAL;
 			break;
@@ -264,7 +249,7 @@ static ssize_t blocked_domains_store(struct kobject *kobj, struct kobj_attribute
 		WRITE_ONCE(blocked_domain_count, nd);
 		spin_unlock_bh(&ip_list_lock);
 	}
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 out:
 	kfree(tmp);
 	kfree(copy);
@@ -295,6 +280,25 @@ static struct kobj_attribute key_attr = __ATTR(key, 0400, unload_key_show, NULL)
 static struct kobj_attribute pgp_active_attr = __ATTR_RW(pgp_active);
 static struct kobj_attribute disable_attr = __ATTR_WO(disable);
 
+#ifdef KBLOCKER_DEBUG
+/*
+ * Run the boot-time state recovery again, so a fuzzer that rewrites the
+ * state file while disabled can reach its parser without reloading the
+ * module. Never built into release modules: it would let anyone who can
+ * write the state file start a locked session.
+ */
+static ssize_t debug_restore_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	mutex_lock(&kb_lock);
+	try_restore_state_from_disk();
+	kb_unlock();
+	return count;
+}
+static struct kobj_attribute debug_restore_attr = __ATTR_WO(debug_restore);
+#endif
+
 static struct attribute *attrs[] = {
 	&status_attr.attr,
 	&enabled_attr.attr,
@@ -306,6 +310,9 @@ static struct attribute *attrs[] = {
 	&key_attr.attr,
 	&pgp_active_attr.attr,
 	&disable_attr.attr,
+#ifdef KBLOCKER_DEBUG
+	&debug_restore_attr.attr,
+#endif
 	NULL,
 };
 
@@ -336,7 +343,7 @@ static int __init kblocker_init(void)
 	try_restore_state_from_disk();
 	if (!state_restored)
 		generate_unload_key();
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 
 	/* sysfs last, so nothing can race with the restore above */
 	kblocker_kobj = kobject_create_and_add("kblocker", kernel_kobj);
@@ -357,7 +364,7 @@ static int __init kblocker_init(void)
 err_session:
 	mutex_lock(&kb_lock);
 	disable_blocking();
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 	session_exit();
 	kblocker_cleanup_netfilter();
 err_free:

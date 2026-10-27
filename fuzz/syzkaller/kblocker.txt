@@ -13,6 +13,8 @@ resource fd_kblocker_domains[fd]
 resource fd_kblocker_ips[fd]
 resource fd_kblocker_pgp[fd]
 resource fd_kblocker_key[fd]
+resource fd_kblocker_restore[fd]
+resource fd_kblocker_state[fd]
 
 openat$kblocker_ro(fd const[AT_FDCWD], file ptr[in, string[kblocker_ro_files]], flags const[O_RDONLY], mode const[0]) fd_kblocker_ro
 openat$kblocker_enabled(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/enabled"]], flags const[O_RDWR], mode const[0]) fd_kblocker_enabled
@@ -20,6 +22,72 @@ openat$kblocker_domains(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kbl
 openat$kblocker_ips(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/blocked_ips"]], flags const[O_RDWR], mode const[0]) fd_kblocker_ips
 openat$kblocker_pgp(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/pgp_active"]], flags const[O_RDWR], mode const[0]) fd_kblocker_pgp
 openat$kblocker_key(fd const[AT_FDCWD], file ptr[in, string[kblocker_key_files]], flags const[O_WRONLY], mode const[0]) fd_kblocker_key
+
+# KBLOCKER_DEBUG only: rerun boot-time recovery from the state file, which
+# the fuzzer can rewrite while no session is active.
+openat$kblocker_restore(fd const[AT_FDCWD], file ptr[in, string["/sys/kernel/kblocker/debug_restore"]], flags const[O_WRONLY], mode const[0]) fd_kblocker_restore
+write$kblocker_restore(fd fd_kblocker_restore, buf ptr[in, string["1"]], len bytesize[buf])
+
+openat$kblocker_state(fd const[AT_FDCWD], file ptr[in, string["/dev/kblocker-state"]], flags flags[open_flags], mode const[0]) fd_kblocker_state
+write$kblocker_state(fd fd_kblocker_state, buf ptr[in, array[kblocker_state_line]], len bytesize[buf])
+write$kblocker_state_raw(fd fd_kblocker_state, buf buffer[in], len bytesize[buf])
+
+# Records of the state file as the kernel writes them, plus damaged and
+# legacy (wall-clock "expiry:") forms. A restored session can only be ended
+# with the key behind key_hash, which the fuzzer never has, so remaining
+# times stay short and legacy expiry times are always in the past.
+kblocker_state_line [
+	remaining	kblocker_state_remaining
+	key_hash	kblocker_state_key_hash
+	pgp		stringnoz["pgp_active:1\n"]
+	domains		kblocker_state_domains
+	ips		kblocker_state_ips
+	expiry		kblocker_state_expiry
+	torn		stringnoz[kblocker_state_prefixes]
+	junk		array[int8, 0:16]
+] [varlen]
+
+kblocker_state_prefixes = "remaining:", "key_hash:", "domains:", "blocked_ips:", "expiry:", "\n"
+
+kblocker_state_remaining {
+	tag	stringnoz["remaining:"]
+	val	fmt[dec, int64[0:120]]
+	nl	const[0xa, int8]
+} [packed]
+
+kblocker_state_key_hash {
+	tag	stringnoz["key_hash:"]
+	digits	array[flags[kblocker_hex_digits, int8], 62:66]
+	nl	const[0xa, int8]
+} [packed]
+
+kblocker_state_domains {
+	tag	stringnoz["domains:"]
+	names	array[kblocker_state_domain, 0:6]
+	nl	const[0xa, int8]
+} [packed]
+
+kblocker_state_domain {
+	name	stringnoz[kblocker_domain_inputs]
+	sep	const[0x2c, int8]
+} [packed]
+
+kblocker_state_ips {
+	tag	stringnoz["blocked_ips:"]
+	addrs	array[kblocker_state_ip, 0:6]
+	nl	const[0xa, int8]
+} [packed]
+
+kblocker_state_ip {
+	addr	stringnoz[kblocker_ip_inputs]
+	sep	const[0x2c, int8]
+} [packed]
+
+kblocker_state_expiry {
+	tag	stringnoz["expiry:"]
+	val	fmt[dec, int64[0:1700000000]]
+	nl	const[0xa, int8]
+} [packed]
 
 kblocker_ro_files = "/sys/kernel/kblocker/status", "/sys/kernel/kblocker/remaining", "/sys/kernel/kblocker/block_count", "/sys/kernel/kblocker/key", "/sys/kernel/kblocker/enabled", "/sys/kernel/kblocker/blocked_domains", "/sys/kernel/kblocker/blocked_ips", "/sys/kernel/kblocker/pgp_active"
 kblocker_key_files = "/sys/kernel/kblocker/disable", "/sys/kernel/kblocker/unblock"
@@ -195,4 +263,4 @@ chmod$kblocker(file ptr[in, string[kblocker_protected_paths]], mode flags[open_m
 mount$kblocker_bind(src ptr[in, filename], dst ptr[in, string[kblocker_protected_paths]], type ptr[in, string["pipefs"]], flags const[MS_BIND], data const[0])
 umount2$kblocker(path ptr[in, string[kblocker_protected_paths]], flags flags[umount_flags])
 
-kblocker_protected_paths = "/etc/hosts", "/etc/modules-load.d/kblocker.conf", "/var/lib/kblocker/state"
+kblocker_protected_paths = "/dev/kblocker-hosts", "/dev/kblocker-modules.conf", "/dev/kblocker-state"

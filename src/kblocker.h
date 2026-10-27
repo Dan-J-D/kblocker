@@ -7,6 +7,7 @@
 #include <linux/netfilter.h>
 #include <linux/version.h>
 #include <linux/workqueue.h>
+#include "parse.h"
 
 /* struct mnt_idmap in inode_operations, fileattr_set, sha256() library */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
@@ -18,10 +19,12 @@
 #define PROTECT_INTERVAL_MS 1000
 #define MAX_PROTECTED_PATHS 8
 #define MAX_DOMAINS 64
-#define MAX_DOMAIN_LEN 256
-#define STATE_FILE "/var/lib/kblocker/state"
+#ifdef KBLOCKER_DEBUG
+/* Short sessions under a fuzzer still reach the periodic save */
+#define STATE_SAVE_INTERVAL_S 2
+#else
 #define STATE_SAVE_INTERVAL_S 60
-#define HOSTS_MARKER "# kblocker managed entries - do not edit manually"
+#endif
 #define HOSTS_MAX_SIZE (1024 * 1024)
 /* Upper bound for a session; keeps arithmetic far from overflow */
 #define MAX_SESSION_SECONDS (10ULL * 365 * 24 * 3600)
@@ -51,9 +54,18 @@ extern atomic_t ref_taken;
 
 extern struct kobject *kblocker_kobj;
 
+/* Protected file paths. Fixed in release builds; debug builds (make
+ * KBLOCKER_DEBUG=1) take them as module parameters so fuzzers can point
+ * them at files visible inside their sandboxes. */
+extern char *kb_hosts_file;
+extern char *kb_state_file;
+extern char *kb_modconf_file;
+
+/* Release kb_lock; debug builds first check the session invariants */
+void kb_unlock(void);
+
 /* key.c */
 bool ct_memcmp_eq(const u8 *a, const u8 *b, size_t size);
-int hex_decode(const char *s, u8 *out, int count);
 void generate_unload_key(void);
 ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 		      const char *buf, size_t count);

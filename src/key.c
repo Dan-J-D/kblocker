@@ -14,26 +14,6 @@ bool ct_memcmp_eq(const u8 *a, const u8 *b, size_t size)
 	return diff == 0;
 }
 
-static int hex_val(char c)
-{
-	if (c >= '0' && c <= '9') return c - '0';
-	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-	return -1;
-}
-
-int hex_decode(const char *s, u8 *out, int count)
-{
-	int i;
-	for (i = 0; i < count; i++) {
-		int hi = hex_val(s[i * 2]);
-		int lo = hex_val(s[i * 2 + 1]);
-		if (hi < 0 || lo < 0) return -1;
-		out[i] = (hi << 4) | lo;
-	}
-	return 0;
-}
-
 /* Caller holds kb_lock (or is module init) */
 void generate_unload_key(void)
 {
@@ -53,7 +33,7 @@ static int check_key(const char *buf, size_t count)
 
 	if (count && buf[count - 1] == '\n')
 		count--;
-	if (count != 32 || hex_decode(buf, parsed, 16))
+	if (count != 32 || kb_hex_decode(buf, parsed, 16))
 		return -EINVAL;
 
 	sha256(parsed, sizeof(parsed), input_hash);
@@ -71,7 +51,7 @@ ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 	mutex_lock(&kb_lock);
 	ret = check_key(buf, count);
 	if (ret) {
-		mutex_unlock(&kb_lock);
+		kb_unlock();
 		if (ret == -EPERM)
 			printk(KERN_WARNING "kblocker: invalid unload key attempt\n");
 		return ret;
@@ -81,7 +61,7 @@ ssize_t unblock_store(struct kobject *kobj, struct kobj_attribute *attr,
 	WRITE_ONCE(allow_unload, true);
 	memzero_explicit(unload_key, sizeof(unload_key));
 	memzero_explicit(key_hash, sizeof(key_hash));
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 
 	printk(KERN_INFO "kblocker: unload authorized, auto-disabled\n");
 	return count;
@@ -95,13 +75,13 @@ ssize_t disable_store(struct kobject *kobj, struct kobj_attribute *attr,
 	mutex_lock(&kb_lock);
 	if (!pgp_active) {
 		disable_blocking();
-		mutex_unlock(&kb_lock);
+		kb_unlock();
 		return count;
 	}
 
 	ret = check_key(buf, count);
 	if (ret) {
-		mutex_unlock(&kb_lock);
+		kb_unlock();
 		if (ret == -EPERM)
 			printk(KERN_WARNING "kblocker: invalid disable key attempt\n");
 		return ret;
@@ -109,7 +89,7 @@ ssize_t disable_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 	disable_blocking();
 	generate_unload_key();
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 
 	printk(KERN_INFO "kblocker: authorized disable, new key generated\n");
 	return count;
@@ -140,7 +120,7 @@ ssize_t unload_key_show(struct kobject *kobj, struct kobj_attribute *attr,
 			len += sysfs_emit_at(buf, len, "%02x", unload_key[i]);
 		len += sysfs_emit_at(buf, len, "\n");
 	}
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 	return len;
 }
 
@@ -161,7 +141,7 @@ ssize_t pgp_active_store(struct kobject *kobj, struct kobj_attribute *attr,
 	mutex_lock(&kb_lock);
 	if (enabled) {
 		/* Once enabled, pgp_active is kernel-managed — read-only */
-		mutex_unlock(&kb_lock);
+		kb_unlock();
 		printk(KERN_WARNING "kblocker: pgp_active is read-only while enabled\n");
 		return -EPERM;
 	}
@@ -179,7 +159,7 @@ ssize_t pgp_active_store(struct kobject *kobj, struct kobj_attribute *attr,
 		pgp_key_consumed = true;
 		printk(KERN_INFO "kblocker: PGP mode pre-arm cancelled\n");
 	}
-	mutex_unlock(&kb_lock);
+	kb_unlock();
 
 	return count;
 }

@@ -19,7 +19,6 @@
 
 /* TLS record header (5) + maximum plaintext record (16 KiB) */
 #define TLS_MAX_RECORD (5 + 16384)
-#define TLS_EXT_SERVER_NAME 0x0000
 
 /* [0] LOCAL_OUT, [1] FORWARD; filled in by kblocker_register_netfilter().
  * Must be static: netfilter keeps pointers to the registered ops. */
@@ -74,19 +73,7 @@ static bool is_ipv6_blocked(const struct in6_addr *addr)
 }
 #endif
 
-/* @host equals @blocked, or ends in "." + @blocked (so x.com blocks
- * www.x.com but not netflix.com) */
-static bool domain_matches(const char *host, size_t hlen, const char *blocked)
-{
-	size_t blen = strlen(blocked);
-
-	if (!blen || hlen < blen)
-		return false;
-	if (strncasecmp(host + hlen - blen, blocked, blen))
-		return false;
-	return hlen == blen || host[hlen - blen - 1] == '.';
-}
-
+/* kb_domain_matches(): x.com blocks www.x.com but not netflix.com */
 static bool domain_list_contains(const char *hostname)
 {
 	size_t hlen = strlen(hostname);
@@ -98,75 +85,18 @@ static bool domain_list_contains(const char *hostname)
 
 	spin_lock_bh(&ip_list_lock);
 	for (i = 0; i < blocked_domain_count && !found; i++)
-		found = domain_matches(hostname, hlen, blocked_domains[i]);
+		found = kb_domain_matches(hostname, hlen, blocked_domains[i]);
 	spin_unlock_bh(&ip_list_lock);
 	return found;
 }
 
-static u16 get_u16(const u8 *p)
-{
-	return (p[0] << 8) | p[1];
-}
-
-/*
- * @data holds @len bytes starting at a TLS handshake record. Returns true
- * if the ClientHello carries a server_name that is blocked.
- *
- * Encrypted Client Hello (0xfe0d) is not treated specially: its outer
- * server_name (the provider's public name) is still matched, and ECH
- * hellos are not dropped wholesale because browsers send GREASE ECH
- * extensions on ordinary connections.
- */
+/* @data holds @len bytes starting at a TLS handshake record */
 static bool sni_matches_blocked(const u8 *data, int len)
 {
-	int off, end, ext_end;
+	char sni[MAX_DOMAIN_LEN];
 
-	if (len < 9 || data[0] != 0x16 || data[5] != 0x01)
-		return false;
-
-	/* record(5) + handshake type(1) + length(3) + version(2) + random(32) */
-	off = 5 + 4 + 2 + 32;
-	if (off + 1 > len)
-		return false;
-	off += 1 + data[off];			/* session id */
-	if (off + 2 > len)
-		return false;
-	off += 2 + get_u16(data + off);		/* cipher suites */
-	if (off + 1 > len)
-		return false;
-	off += 1 + data[off];			/* compression methods */
-	if (off + 2 > len)
-		return false;
-	ext_end = off + 2 + get_u16(data + off);
-	off += 2;
-	end = min(len, ext_end);
-
-	while (off + 4 <= end) {
-		int type = get_u16(data + off);
-		int ext_len = get_u16(data + off + 2);
-
-		off += 4;
-		if (off + ext_len > end)
-			return false;
-
-		if (type == TLS_EXT_SERVER_NAME) {
-			/* list length(2), name type(1), name length(2) */
-			int name_len;
-			char sni[MAX_DOMAIN_LEN];
-
-			if (ext_len < 5 || data[off + 2] != 0x00)
-				return false;
-			name_len = get_u16(data + off + 3);
-			if (name_len <= 0 || name_len >= sizeof(sni) ||
-			    5 + name_len > ext_len)
-				return false;
-			memcpy(sni, data + off + 5, name_len);
-			sni[name_len] = '\0';
-			return domain_list_contains(sni);
-		}
-		off += ext_len;
-	}
-	return false;
+	return kb_sni_extract(data, len, sni, sizeof(sni)) &&
+	       domain_list_contains(sni);
 }
 
 /* @thoff is the offset of the TCP header within @skb */
@@ -195,7 +125,7 @@ static unsigned int inspect_tcp(struct sk_buff *skb, unsigned int thoff)
 
 	/* Copy the ClientHello out of the (possibly paged) skb, bounded by
 	 * what is actually present. */
-	copy = min_t(unsigned int, skb->len - doff, 5 + get_u16(hdr + 3));
+	copy = min_t(unsigned int, skb->len - doff, 5 + ((hdr[3] << 8) | hdr[4]));
 	copy = min_t(unsigned int, copy, TLS_MAX_RECORD);
 	buf = kmalloc(copy, GFP_ATOMIC);
 	if (!buf)

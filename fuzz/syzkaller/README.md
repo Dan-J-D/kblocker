@@ -18,9 +18,26 @@ What the descriptions in `kblocker.txt` exercise:
 - the file-protection hooks, through `open`, `unlink`, `rename`, `link`,
   `truncate`, `chmod`, bind mounts and `FS_IOC_SETFLAGS` on the protected paths,
   racing with sessions being enabled and disabled
+- boot-time recovery from the state file: the fuzzer rewrites the state file
+  with valid, torn and legacy records while no session is active, then
+  triggers recovery through `debug_restore` (a debug-build-only attribute)
+- the periodic `remaining:` appends, which debug builds make every 2 seconds
+  instead of every 60
 
-The module is loaded with `hook_all_netns=1` in the VM, because syz-executor
-runs every test process in its own network namespace.
+The module is built with `KBLOCKER_DEBUG=1` and loaded in the VM with:
+
+- `hook_all_netns=1`, because syz-executor runs every test process in its own
+  network namespace;
+- `hosts_file=/dev/kblocker-hosts`, `state_file=/dev/kblocker-state` and
+  `modconf_file=/dev/kblocker-modules.conf` (created by a `tmpfiles.d` entry),
+  because the executor sandbox only sees `/dev`, `/proc` and `/sys`, so
+  protected files under `/etc` and `/var` would be unreachable. These
+  parameters exist only in debug builds.
+
+`KBLOCKER_DEBUG` also checks kblocker's session invariants each time
+`kb_lock` is released (`kb_check_invariants()` in `src/state.c`). A violated
+invariant is a `WARN`, so logic bugs show up as crashes even when nothing
+faults.
 
 ## Requirements
 

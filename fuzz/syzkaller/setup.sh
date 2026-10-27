@@ -75,9 +75,10 @@ stage_module() {
 	# regular host build in the repository.
 	rm -rf "$WORK/module"/*
 	cp -a "$REPO/src" "$WORK/module/"
-	printf 'obj-m += kblocker.o\nkblocker-objs := src/main.o src/netfilter.o src/file_protection.o src/state.o src/key.o\n' \
-		> "$WORK/module/Kbuild"
-	make -C "$WORK/linux" M="$WORK/module" -j"$JOBS" modules
+	cp "$REPO/Makefile" "$WORK/module/"
+	# KBLOCKER_DEBUG turns invariant violations into WARNs, which the
+	# fuzzer reports as crashes, and allows relocating the protected files
+	make -C "$WORK/linux" M="$WORK/module" KBLOCKER_DEBUG=1 -j"$JOBS" modules
 	echo "built $WORK/module/kblocker.ko"
 }
 
@@ -104,7 +105,17 @@ stage_image() {
 	sudo install -D -m 644 "$WORK/module/kblocker.ko" "$mnt/lib/modules/$rel/extra/kblocker.ko"
 	sudo depmod -b "$mnt" "$rel"
 	echo kblocker | sudo tee "$mnt/etc/modules-load.d/kblocker.conf" >/dev/null
-	echo "options kblocker hook_all_netns=1" | sudo tee "$mnt/etc/modprobe.d/kblocker.conf" >/dev/null
+	# The executor sandbox only sees /dev, /proc and /sys, so the debug
+	# build protects files under /dev (a devtmpfs, recreated each boot)
+	# instead of /etc and /var, letting syscalls reach the protection code.
+	sudo tee "$mnt/etc/tmpfiles.d/kblocker-fuzz.conf" >/dev/null <<-'EOF'
+		f /dev/kblocker-hosts 0644 root root - 127.0.0.1 localhost\n::1 localhost\n
+		f /dev/kblocker-modules.conf 0644 root root - kblocker\n
+		f /dev/kblocker-state 0600 root root -
+	EOF
+	echo "options kblocker hook_all_netns=1 hosts_file=/dev/kblocker-hosts" \
+		"state_file=/dev/kblocker-state modconf_file=/dev/kblocker-modules.conf" |
+		sudo tee "$mnt/etc/modprobe.d/kblocker.conf" >/dev/null
 	sudo mkdir -p "$mnt/var/lib/kblocker"
 	# debootstrap images have no /etc/hosts; kblocker rewrites it
 	if ! sudo test -f "$mnt/etc/hosts"; then

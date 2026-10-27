@@ -76,18 +76,6 @@ char *kb_read_file(struct file *f, loff_t *out_len)
 	return buf;
 }
 
-/* Length of @buf with the kblocker block and trailing newlines removed */
-static loff_t hosts_base_len(const char *buf, loff_t len)
-{
-	const char *p = strstr(buf, HOSTS_MARKER);
-
-	if (p)
-		len = p - buf;
-	while (len > 0 && buf[len - 1] == '\n')
-		len--;
-	return len;
-}
-
 /*
  * Replace everything from @base onwards with @tail. Bytes before @base
  * are the user's own entries and are never rewritten, so a failed write
@@ -102,13 +90,13 @@ static int hosts_write_tail(struct file *file, loff_t base,
 
 	written = kernel_write(file, tail, tlen, &pos);
 	if (written != tlen) {
-		printk(KERN_ERR "kblocker: /etc/hosts write failed (ret=%zd)\n",
+		printk(KERN_ERR "kblocker: hosts file write failed (ret=%zd)\n",
 		       written);
 		return written < 0 ? written : -EIO;
 	}
 	ret = vfs_truncate(&file->f_path, base + tlen);
 	if (ret)
-		printk(KERN_ERR "kblocker: /etc/hosts truncate failed (ret=%d)\n",
+		printk(KERN_ERR "kblocker: hosts file truncate failed (ret=%d)\n",
 		       ret);
 	return ret;
 }
@@ -120,19 +108,19 @@ void clear_hosts_from_kernel(void)
 	char *buf;
 	loff_t len, base;
 
-	file = filp_open("/etc/hosts", O_RDWR, 0);
+	file = filp_open(kb_hosts_file, O_RDWR, 0);
 	if (IS_ERR(file))
 		return;
 
 	buf = kb_read_file(file, &len);
 	if (IS_ERR(buf)) {
-		printk(KERN_ERR "kblocker: reading /etc/hosts failed: %ld\n",
+		printk(KERN_ERR "kblocker: reading hosts file failed: %ld\n",
 		       PTR_ERR(buf));
 		goto out;
 	}
 
 	if (strstr(buf, HOSTS_MARKER)) {
-		base = hosts_base_len(buf, len);
+		base = kb_hosts_base_len(buf, len);
 		if (!hosts_write_tail(file, base, "\n", 1))
 			printk(KERN_DEBUG "kblocker: cleared hosts file entries\n");
 	}
@@ -149,7 +137,7 @@ int update_hosts_file(void)
 	char *buf = NULL, *tail = NULL;
 	loff_t len, base;
 	size_t tsize, tlen;
-	int i, nd, ret;
+	int nd, ret;
 
 	doms = kmalloc_array(MAX_DOMAINS, MAX_DOMAIN_LEN, GFP_KERNEL);
 	if (!doms)
@@ -164,10 +152,10 @@ int update_hosts_file(void)
 		return 0;
 	}
 
-	file = filp_open("/etc/hosts", O_RDWR, 0);
+	file = filp_open(kb_hosts_file, O_RDWR, 0);
 	if (IS_ERR(file)) {
 		ret = PTR_ERR(file);
-		printk(KERN_ERR "kblocker: filp_open /etc/hosts failed: %d\n", ret);
+		printk(KERN_ERR "kblocker: opening hosts file failed: %d\n", ret);
 		goto out_free;
 	}
 
@@ -175,27 +163,21 @@ int update_hosts_file(void)
 	if (IS_ERR(buf)) {
 		ret = PTR_ERR(buf);
 		buf = NULL;
-		printk(KERN_ERR "kblocker: not updating /etc/hosts, read failed: %d\n",
+		printk(KERN_ERR "kblocker: not updating hosts file, read failed: %d\n",
 		       ret);
 		goto out_close;
 	}
-	base = hosts_base_len(buf, len);
+	base = kb_hosts_base_len(buf, len);
 
-	tsize = sizeof(HOSTS_MARKER) + 4;
-	for (i = 0; i < nd; i++)
-		tsize += 4 * strlen(doms[i]) + 48;
+	tsize = kb_hosts_block_size(doms[0], nd, MAX_DOMAIN_LEN);
 	tail = kmalloc(tsize, GFP_KERNEL);
 	if (!tail) {
 		ret = -ENOMEM;
 		goto out_close;
 	}
 
-	tlen = scnprintf(tail, tsize, "\n\n%s\n", HOSTS_MARKER);
-	for (i = 0; i < nd; i++)
-		tlen += scnprintf(tail + tlen, tsize - tlen,
-				  "0.0.0.0 %s\n:: %s\n0.0.0.0 www.%s\n:: www.%s\n",
-				  doms[i], doms[i], doms[i], doms[i]);
-	tlen += scnprintf(tail + tlen, tsize - tlen, "\n");
+	tlen = kb_hosts_format(doms[0], nd, MAX_DOMAIN_LEN, tail, tsize);
+	WARN_ON_ONCE(tlen != tsize);
 
 	ret = hosts_write_tail(file, base, tail, tlen);
 	if (!ret)
@@ -460,8 +442,8 @@ void protection_init(void)
 	snprintf(ko_path, sizeof(ko_path),
 		 "/lib/modules/%s/updates/dkms/kblocker.ko", utsname()->release);
 	add_target(ko_path, S_IMMUTABLE);
-	add_target("/etc/modules-load.d/kblocker.conf", S_IMMUTABLE);
-	add_target("/etc/hosts", S_IMMUTABLE);
+	add_target(kb_modconf_file, S_IMMUTABLE);
+	add_target(kb_hosts_file, S_IMMUTABLE);
 	/* Append-only: the kernel keeps appending remaining-time records */
-	add_target(STATE_FILE, S_APPEND);
+	add_target(kb_state_file, S_APPEND);
 }

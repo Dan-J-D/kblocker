@@ -203,3 +203,23 @@ throwaway VMs, see [fuzz/syzkaller](fuzz/syzkaller/README.md):
 ```sh
 make syz-setup && make syz-run
 ```
+
+The fuzzing build is compiled with `KBLOCKER_DEBUG=1`, which checks the
+session invariants after every state change (enabled exactly when the module
+holds its own reference, no protected files or state file while disabled, no
+raw key in memory during a PGP session, a restored session is always
+PGP-locked, list sizes in bounds, stored domains normalized). A violation is
+a `WARN`, which syzkaller reports as a crash with a reproducer.
+
+### Property tests
+
+The parsing code (`src/parse.c`: SNI extraction, domain matching and
+normalization, key and state-file parsing, the hosts-file block) is plain C
+shared with a userspace build. `make proptest` runs Hypothesis property tests
+of it under AddressSanitizer and UBSan, comparing each function with a short
+Python model:
+
+```sh
+make proptest
+KB_PROPTEST_EXAMPLES=100000 tests/proptest/run.sh   # longer soak
+```
