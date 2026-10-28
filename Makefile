@@ -11,7 +11,10 @@ KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 DESTDIR ?=
 
-all: kblockerctl
+# Every build target; install and uninstall stay separate
+all: module kblockerctl kfuzz gui deb
+
+module:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
 
 kblockerctl: $(wildcard cmd/kblockerctl/*.go)
@@ -69,7 +72,7 @@ clean:
 	rm -f src/*.o src/*.ko src/*.mod.c src/.*.cmd Module.symvers modules.order kblockerctl kfuzz
 	rm -rf tests/proptest/build
 
-install: all
+install: module kblockerctl
 	@if [ "$(shell id -u)" -ne 0 ]; then \
 		echo "Re-running install as root..."; \
 		exec sudo $(MAKE) install; \
@@ -186,4 +189,4 @@ test:
 %:
 	@:
 
-.PHONY: all gui deb clean install uninstall test kblockerctl proptest syz-setup syz-run syz-setup-kcsan syz-run-kcsan
+.PHONY: all module gui deb clean install uninstall test kblockerctl proptest syz-setup syz-run syz-setup-kcsan syz-run-kcsan
