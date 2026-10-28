@@ -1,6 +1,8 @@
 .claude/
 .claudeignore
 
+.vscode/
+
 kfuzz
 /kblockerctl
 *.ko
