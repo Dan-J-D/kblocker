@@ -17,10 +17,19 @@ all: kblockerctl
 kblockerctl: $(wildcard cmd/kblockerctl/*.go)
 	go build -o kblockerctl $(filter-out %_test.go,$(wildcard cmd/kblockerctl/*.go))
 
+# Desktop app (gui/), release build without Tauri's own bundles; the deb
+# ships it as /usr/local/bin/kblocker
+GUI_BIN := gui/src-tauri/target/release/kblocker-gui
+
+gui: $(GUI_BIN)
+
+$(GUI_BIN): $(shell find gui/src gui/public gui/src-tauri/src gui/src-tauri/capabilities gui/src-tauri/icons -type f 2>/dev/null) gui/package.json gui/pnpm-lock.yaml gui/astro.config.mjs gui/src-tauri/Cargo.toml gui/src-tauri/tauri.conf.json
+	cd gui && pnpm install --frozen-lockfile && pnpm tauri build --no-bundle
+
 kfuzz: cmd/fuzz/main.go
 	go build -o kfuzz cmd/fuzz/main.go
 
-deb: kblockerctl
+deb: kblockerctl $(GUI_BIN)
 	@set -e; \
 	ARCH=$$(dpkg --print-architecture); \
 	VERSION="2.0-1"; \
@@ -31,6 +40,7 @@ deb: kblockerctl
 	rm -f "build/$$DEB"; \
 	install -d "$$PKG_DIR/usr/local/bin"; \
 	install -m 755 kblockerctl "$$PKG_DIR/usr/local/bin/kblockerctl"; \
+	install -m 755 $(GUI_BIN) "$$PKG_DIR/usr/local/bin/kblocker"; \
 	install -d "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}"; \
 	cp -a src dkms.conf Makefile "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}/"; \
 	find "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}/src" -name '*.o' -o -name '*.o.cmd' -o -name '*.mod.c' -o -name '*.ko' -o -name '*.mod' | xargs rm -f 2>/dev/null || true; \
@@ -176,4 +186,4 @@ test:
 %:
 	@:
 
-.PHONY: all clean install uninstall test kblockerctl proptest syz-setup syz-run syz-setup-kcsan syz-run-kcsan
+.PHONY: all gui deb clean install uninstall test kblockerctl proptest syz-setup syz-run syz-setup-kcsan syz-run-kcsan

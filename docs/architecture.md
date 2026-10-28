@@ -61,5 +61,6 @@
 
 `gui/` is a Tauri app (Astro + Svelte + Tailwind). It reads state directly and makes
 changes through `pkexec kblockerctl`, using the polkit policy that `make install`
-puts in place. Scheduled blocks and history don't depend on it: the scheduler service
+puts in place. Run as root (`sudo kblocker`, from the `.deb`), it calls `kblockerctl`
+directly, and files it saves are given to the user who ran sudo. Scheduled blocks and history don't depend on it: the scheduler service
 handles both.

@@ -2,8 +2,10 @@
 //!
 //! Everything the app shows is read directly: the module's sysfs attributes,
 //! the domain list, the schedule and the registered PGP keys are all world
-//! readable. Everything it changes goes through `pkexec kblockerctl …`, so
-//! the CLI stays the single place that knows how to drive the module.
+//! readable. Everything it changes goes through `pkexec kblockerctl …` (or
+//! kblockerctl directly when the app already runs as root, as `sudo
+//! kblocker`), so the CLI stays the single place that knows how to drive the
+//! module.
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -300,21 +302,35 @@ struct CtlOutput {
     stdout: String,
 }
 
-/// Runs kblockerctl as root through polkit and returns its stdout, or its
-/// stderr as the error.
+extern "C" {
+    fn geteuid() -> u32;
+}
+
+fn is_root() -> bool {
+    unsafe { geteuid() == 0 }
+}
+
+/// Runs kblockerctl as root, through polkit unless the app already is root,
+/// and returns its stdout, or its stderr as the error.
 fn ctl(args: &[&str], stdin: Option<&str>) -> Result<CtlOutput, String> {
     let ctl = ctl_path();
     if !Path::new(&ctl).exists() {
         return Err(format!("kblockerctl isn't installed at {ctl}. Run sudo make install first."));
     }
-    let mut child = Command::new("pkexec")
-        .arg(&ctl)
+    let mut cmd = if is_root() {
+        Command::new(&ctl)
+    } else {
+        let mut c = Command::new("pkexec");
+        c.arg(&ctl);
+        c
+    };
+    let mut child = cmd
         .args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Couldn't run pkexec: {e}"))?;
+        .map_err(|e| format!("Couldn't run {}: {e}", cmd.get_program().to_string_lossy()))?;
     if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
         pipe.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
     }
@@ -460,6 +476,16 @@ fn read_text_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// The user behind `sudo kblocker`, so files saved for them aren't left
+/// owned by root
+fn sudo_owner() -> Option<(u32, u32)> {
+    if !is_root() {
+        return None;
+    }
+    let id = |k| std::env::var(k).ok()?.parse::<u32>().ok();
+    Some((id("SUDO_UID")?, id("SUDO_GID")?))
+}
+
 /// Writes a file only the current user can read (used for private keys)
 #[tauri::command]
 fn write_private_file(path: String, contents: String) -> Result<(), String> {
@@ -471,6 +497,9 @@ fn write_private_file(path: String, contents: String) -> Result<(), String> {
         .mode(0o600)
         .open(&path)
         .map_err(|e| e.to_string())?;
+    if let Some((uid, gid)) = sudo_owner() {
+        std::os::unix::fs::fchown(&f, Some(uid), Some(gid)).map_err(|e| e.to_string())?;
+    }
     f.write_all(contents.as_bytes()).map_err(|e| e.to_string())
 }
 

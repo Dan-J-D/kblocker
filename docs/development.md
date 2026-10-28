@@ -11,7 +11,8 @@ Requires kernel headers (`linux-headers-$(uname -r)`) and Go 1.21+. The module n
 ```sh
 sudo ./install.sh     # same as: sudo make install
 sudo ./uninstall.sh   # same as: sudo make uninstall
-make deb              # .deb (DKMS module + kblockerctl) in build/
+make deb              # .deb (DKMS module + kblockerctl + the app as kblocker) in build/
+make gui              # just the app: gui/src-tauri/target/release/kblocker-gui
 ```
 
 ## 🖥️ Desktop app

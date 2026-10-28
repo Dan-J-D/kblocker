@@ -131,7 +131,8 @@ Or send them `http://<your-machine>:8737/unblock` and they can decrypt it in the
 ### 🖥️ Desktop app
 
 - A Tauri app covering status, starting blocks, the schedule, history, sites, key holders and unlocking.
-- Changes go through `pkexec kblockerctl` with the polkit policy `make install` puts in place. Scheduling and history keep working with the app closed.
+- The `.deb` installs it as `kblocker`: run `sudo kblocker`.
+- Changes go through `pkexec kblockerctl` with the polkit policy `make install` puts in place, or straight to `kblockerctl` when the app runs as root. Scheduling and history keep working with the app closed.
 
 ## ⌨️ Commands at a glance
 

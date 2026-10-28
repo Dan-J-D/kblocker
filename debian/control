@@ -2,8 +2,8 @@ Package: kblocker
 Version: 1.0-1
 Architecture: ARCH
 Maintainer: kblocker maintainer <root@localhost>
-Depends: dkms, gnupg, e2fsprogs, xxd
-Recommends: perl
+Depends: dkms, gnupg, e2fsprogs, xxd, libwebkit2gtk-4.1-0, libgtk-3-0t64 | libgtk-3-0
+Recommends: perl, pkexec | policykit-1
 Section: kernel
 Priority: optional
 Description: Self-discipline internet blocker kernel module
@@ -15,4 +15,5 @@ Description: Self-discipline internet blocker kernel module
  so a trusted remote party can authorize unblocking.
  .
  Blocking is disabled by default after installation.
- Use 'kblockerctl enable <minutes>' to activate.
+ Use 'kblockerctl enable <minutes>' to activate, or run
+ 'sudo kblocker' for the desktop app.
