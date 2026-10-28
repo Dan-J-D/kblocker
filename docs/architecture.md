@@ -24,6 +24,7 @@
 │                    Kernel                                │
 │                                                          │
 │  netfilter hooks (LOCAL_OUT, FORWARD)                    │
+│    ├─ IPv4/IPv6 allowlist (CIDR) → accept, skip checks   │
 │    ├─ IPv4/IPv6 IP blacklist check                       │
 │    ├─ TLS SNI inspection (domain blacklist)              │
 │    ├─ outer SNI matched for ECH (0xFE0D) hellos          │

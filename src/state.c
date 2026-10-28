@@ -117,7 +117,7 @@ static int state_file_write_session(u64 seconds)
 	v4 = kmalloc_array(MAX_IPS_V4, sizeof(*v4), GFP_KERNEL);
 	v6 = kmalloc_array(MAX_IPS_V6, sizeof(*v6), GFP_KERNEL);
 	size = 256 + MAX_DOMAINS * (MAX_DOMAIN_LEN + 1) +
-	       MAX_IPS_V4 * 16 + MAX_IPS_V6 * 41;
+	       MAX_IPS_V4 * 16 + MAX_IPS_V6 * 41 + MAX_ALLOWED_NETS * (19 + 44);
 	buf = kvmalloc(size, GFP_KERNEL);
 	if (!doms || !v4 || !v6 || !buf)
 		goto out;
@@ -145,6 +145,11 @@ static int state_file_write_session(u64 seconds)
 			len += scnprintf(buf + len, size - len, "%pI4,", &v4[i]);
 		for (i = 0; i < n6; i++)
 			len += scnprintf(buf + len, size - len, "%pI6c,", &v6[i]);
+		len += scnprintf(buf + len, size - len, "\n");
+	}
+	if (READ_ONCE(allowed_count_v4) || READ_ONCE(allowed_count_v6)) {
+		len += scnprintf(buf + len, size - len, "allowed_ips:");
+		len += kb_format_allowed(buf + len, size - len, ",");
 		len += scnprintf(buf + len, size - len, "\n");
 	}
 
@@ -241,6 +246,10 @@ static void kb_check_invariants(void)
 	WARN_ONCE(nd < 0 || nd > MAX_DOMAINS, "kblocker: %d domains\n", nd);
 	WARN_ONCE(n4 < 0 || n4 > MAX_IPS_V4, "kblocker: %d IPv4 entries\n", n4);
 	WARN_ONCE(n6 < 0 || n6 > MAX_IPS_V6, "kblocker: %d IPv6 entries\n", n6);
+	WARN_ONCE(allowed_count_v4 < 0 || allowed_count_v4 > MAX_ALLOWED_NETS ||
+		  allowed_count_v6 < 0 || allowed_count_v6 > MAX_ALLOWED_NETS,
+		  "kblocker: %d/%d allowed networks\n",
+		  allowed_count_v4, allowed_count_v6);
 	for (i = 0; i < nd && i < MAX_DOMAINS; i++) {
 		const char *d = blocked_domains[i];
 		char *n;
@@ -467,6 +476,42 @@ out:
 	kfree(copy);
 }
 
+/* All or nothing: a malformed line leaves the allowlist empty, which can
+ * only block more, never less */
+static void restore_allowed(char *buf)
+{
+	struct kb_net4 *tmp_v4;
+	struct kb_net6 *tmp_v6;
+	char *p, *end, *copy;
+	int n4, n6;
+
+	p = strstr(buf, "allowed_ips:");
+	if (!p)
+		return;
+	p += 12;
+	end = strchr(p, '\n');
+	if (!end || end == p)
+		return;
+	copy = kmemdup_nul(p, end - p, GFP_KERNEL);
+	tmp_v4 = kmalloc_array(MAX_ALLOWED_NETS, sizeof(*tmp_v4), GFP_KERNEL);
+	tmp_v6 = kmalloc_array(MAX_ALLOWED_NETS, sizeof(*tmp_v6), GFP_KERNEL);
+	if (!copy || !tmp_v4 || !tmp_v6)
+		goto out;
+	if (kb_parse_allowed(copy, ",", tmp_v4, &n4, tmp_v6, &n6))
+		goto out;
+
+	spin_lock_bh(&ip_list_lock);
+	memcpy(allowed_nets_v4, tmp_v4, n4 * sizeof(*tmp_v4));
+	memcpy(allowed_nets_v6, tmp_v6, n6 * sizeof(*tmp_v6));
+	WRITE_ONCE(allowed_count_v4, n4);
+	WRITE_ONCE(allowed_count_v6, n6);
+	spin_unlock_bh(&ip_list_lock);
+out:
+	kfree(tmp_v4);
+	kfree(tmp_v6);
+	kfree(copy);
+}
+
 #ifdef KBLOCKER_DEBUG
 /*
  * Simulate a reboot for the fuzzer: everything held in memory is lost
@@ -491,6 +536,8 @@ void kb_debug_reboot(bool recover)
 	WRITE_ONCE(blocked_count_v4, 0);
 	WRITE_ONCE(blocked_count_v6, 0);
 	WRITE_ONCE(blocked_domain_count, 0);
+	WRITE_ONCE(allowed_count_v4, 0);
+	WRITE_ONCE(allowed_count_v6, 0);
 	spin_unlock_bh(&ip_list_lock);
 	WRITE_ONCE(state_restored, false);
 	WRITE_ONCE(allow_unload, false);
@@ -537,6 +584,7 @@ void try_restore_state_from_disk(void)
 
 	restore_domains(head);
 	restore_ips(head);
+	restore_allowed(head);
 
 	p = strstr(head, "key_hash:");
 	if (!p)

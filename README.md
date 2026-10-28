@@ -109,6 +109,7 @@ Or send them `http://<your-machine>:8737/unblock` and they can decrypt it in the
 - Matches the TLS SNI, including the outer SNI of ECH hellos, against your list; domains are also null-routed via `/etc/hosts`.
 - A rule covers the domain and every subdomain: `x.com` blocks `www.x.com`, not `netflix.com`.
 - Block IPv4 and IPv6 addresses directly with `block-ip`.
+- Exempt addresses or subnets (like a WireGuard network, `10.0.0.0/24`) with `allow-ip`; they can't be changed during a block.
 
 ### 🔐 Locking
 

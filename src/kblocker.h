@@ -19,6 +19,7 @@
 #define PROTECT_INTERVAL_MS 1000
 #define MAX_PROTECTED_PATHS 8
 #define MAX_DOMAINS 64
+#define MAX_ALLOWED_NETS 64
 #ifdef KBLOCKER_DEBUG
 /* Short sessions under a fuzzer still reach the periodic save */
 #define STATE_SAVE_INTERVAL_S 2
@@ -36,6 +37,21 @@ extern int blocked_count_v6;
 extern char blocked_domains[MAX_DOMAINS][MAX_DOMAIN_LEN];
 extern int blocked_domain_count;
 extern spinlock_t ip_list_lock;
+
+/* Destinations that are never blocked, e.g. a WireGuard subnet. Stored
+ * with host bits cleared; like the block lists, fixed while enabled. */
+struct kb_net4 {
+	__be32 addr;
+	__be32 mask;
+};
+struct kb_net6 {
+	struct in6_addr addr;
+	u8 plen;
+};
+extern struct kb_net4 allowed_nets_v4[MAX_ALLOWED_NETS];
+extern int allowed_count_v4;
+extern struct kb_net6 allowed_nets_v6[MAX_ALLOWED_NETS];
+extern int allowed_count_v6;
 
 /*
  * Session state. Writers hold kb_lock; the netfilter hooks and the
@@ -98,6 +114,9 @@ typedef struct fileattr kb_fileattr_t;
 
 /* main.c */
 int snapshot_domains(char (*dst)[MAX_DOMAIN_LEN]);
+int kb_parse_allowed(char *list, const char *sep, struct kb_net4 *v4, int *n4,
+		     struct kb_net6 *v6, int *n6);
+int kb_format_allowed(char *buf, size_t size, const char *sep);
 
 /* file_protection.c */
 char *kb_read_file(struct file *f, loff_t *out_len);

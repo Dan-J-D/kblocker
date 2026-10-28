@@ -21,6 +21,7 @@ Every command is run as root: `sudo kblockerctl <command>`.
 | `remove <domain>` | Remove a domain |
 | `reload` | Re-write domains to kernel, refresh PGP ciphertexts |
 | `block-ip <ip>...` | Set blocked IPs directly (replaces existing list) |
+| `allow-ip <ip\|cidr>...` | Never block traffic to these addresses, e.g. a WireGuard subnet `10.0.0.0/24` (replaces existing list; `--clear` empties it). Saved to `/etc/kblocker/allowed_ips.conf`, applied on every `enable`, and fixed while a block is active |
 | `list` | Show blocked IPs and configured domains |
 
 Domain rules match the exact name or any subdomain: `x.com` blocks `www.x.com`, not `netflix.com`.

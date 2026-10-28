@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const SYSFS: &str = "/sys/kernel/kblocker";
 const DOMAINS_FILE: &str = "/etc/kblocker/domains.conf";
+const ALLOWED_FILE: &str = "/etc/kblocker/allowed_ips.conf";
 const SCHEDULE_FILE: &str = "/etc/kblocker/schedule.json";
 const DEFAULT_CTL: &str = "/usr/local/bin/kblockerctl";
 const SCHEDULER_UNIT: &str = "kblocker-scheduler.service";
@@ -58,6 +59,8 @@ struct Status {
     protected_files: u32,
     blocked_ips: u32,
     domains: Vec<String>,
+    /// Networks that are never blocked, as CIDR
+    allowed_ips: Vec<String>,
     scheduler_active: bool,
     /// Base URL of the key holder pages the scheduler hosts, if running
     web_url: Option<String>,
@@ -138,6 +141,13 @@ fn status() -> Status {
         domains = read_lines(&format!("{SYSFS}/blocked_domains"));
     }
 
+    // Same for the allowlist: enable applies the config file when it exists
+    let allowed_ips = if Path::new(ALLOWED_FILE).exists() {
+        read_lines(ALLOWED_FILE)
+    } else {
+        read_lines(&format!("{SYSFS}/allowed_ips"))
+    };
+
     let scheduler_active = Command::new("systemctl")
         .args(["is-active", "--quiet", SCHEDULER_UNIT])
         .status()
@@ -157,6 +167,7 @@ fn status() -> Status {
         protected_files: num("protected_files") as u32,
         blocked_ips: (num("blocked_ips_v4") + num("blocked_ips_v6")) as u32,
         domains,
+        allowed_ips,
         web_url: if scheduler_active { scheduler_web_url(&web_addr) } else { None },
         web_mode: web_mode(&web_addr),
         web_host,
@@ -405,6 +416,17 @@ async fn set_domains(domains: Vec<String>, removed: Option<String>) -> Result<()
     ctl_async(args, None).await.map(|_| ())
 }
 
+#[tauri::command]
+async fn set_allowed_ips(nets: Vec<String>) -> Result<(), String> {
+    let mut args = vec!["allow-ip".to_string()];
+    if nets.is_empty() {
+        args.push("--clear".into());
+    } else {
+        args.extend(nets);
+    }
+    ctl_async(args, None).await.map(|_| ())
+}
+
 /// Where the scheduler hosts the key holder pages: "off", "local", "lan" or
 /// "custom" (which needs `bind`). The port is kept when `port` is None.
 #[tauri::command]
@@ -518,6 +540,7 @@ pub fn run() {
             unblock,
             unload,
             set_domains,
+            set_allowed_ips,
             reload,
             set_web_pages,
             save_schedule,

@@ -20,6 +20,10 @@ struct in6_addr *blocked_ips_v6;
 int blocked_count_v6;
 char blocked_domains[MAX_DOMAINS][MAX_DOMAIN_LEN];
 int blocked_domain_count;
+struct kb_net4 allowed_nets_v4[MAX_ALLOWED_NETS];
+int allowed_count_v4;
+struct kb_net6 allowed_nets_v6[MAX_ALLOWED_NETS];
+int allowed_count_v6;
 DEFINE_SPINLOCK(ip_list_lock);
 
 DEFINE_MUTEX(kb_lock);
@@ -62,6 +66,86 @@ int snapshot_domains(char (*dst)[MAX_DOMAIN_LEN])
 	return n;
 }
 
+/* One "addr" or "addr/prefix" entry; host bits are cleared */
+static int parse_net(char *s, struct kb_net4 *v4, int *n4,
+		     struct kb_net6 *v6, int *n6)
+{
+	char *slash = strchr(s, '/');
+	struct in6_addr a6;
+	__be32 a4;
+	u8 plen;
+	bool is4;
+
+	if (slash)
+		*slash++ = '\0';
+	if (in4_pton(s, -1, (u8 *)&a4, '\0', NULL))
+		is4 = true;
+	else if (in6_pton(s, -1, (u8 *)&a6, '\0', NULL))
+		is4 = false;
+	else
+		return -EINVAL;
+
+	if (!slash)
+		plen = is4 ? 32 : 128;
+	else if (kstrtou8(slash, 10, &plen) || plen > (is4 ? 32 : 128))
+		return -EINVAL;
+
+	if (is4) {
+		__be32 mask = plen ? htonl(~0U << (32 - plen)) : 0;
+
+		if (*n4 >= MAX_ALLOWED_NETS)
+			return -EINVAL;
+		v4[*n4].addr = a4 & mask;
+		v4[*n4].mask = mask;
+		(*n4)++;
+	} else {
+		if (*n6 >= MAX_ALLOWED_NETS)
+			return -EINVAL;
+		ipv6_addr_prefix(&v6[*n6].addr, &a6, plen);
+		v6[*n6].plen = plen;
+		(*n6)++;
+	}
+	return 0;
+}
+
+/* Parse @sep-separated networks from @list (modified); skips blanks and
+ * '#' comments. All or nothing: -EINVAL on any bad or excess entry. */
+int kb_parse_allowed(char *list, const char *sep, struct kb_net4 *v4, int *n4,
+		     struct kb_net6 *v6, int *n6)
+{
+	char *token;
+	int ret;
+
+	*n4 = *n6 = 0;
+	while ((token = strsep(&list, sep))) {
+		token = strim(token);
+		if (token[0] == '\0' || token[0] == '#')
+			continue;
+		ret = parse_net(token, v4, n4, v6, n6);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+/* Write the allowlist as "net/prefix" entries, each followed by @sep */
+int kb_format_allowed(char *buf, size_t size, const char *sep)
+{
+	int i, len = 0;
+
+	spin_lock_bh(&ip_list_lock);
+	for (i = 0; i < allowed_count_v4; i++)
+		len += scnprintf(buf + len, size - len, "%pI4/%u%s",
+				 &allowed_nets_v4[i].addr,
+				 hweight32(ntohl(allowed_nets_v4[i].mask)), sep);
+	for (i = 0; i < allowed_count_v6; i++)
+		len += scnprintf(buf + len, size - len, "%pI6c/%u%s",
+				 &allowed_nets_v6[i].addr,
+				 allowed_nets_v6[i].plen, sep);
+	spin_unlock_bh(&ip_list_lock);
+	return len;
+}
+
 static ssize_t status_show(struct kobject *kobj, struct kobj_attribute *attr,
 			   char *buf)
 {
@@ -70,14 +154,16 @@ static ssize_t status_show(struct kobject *kobj, struct kobj_attribute *attr,
 			  "remaining: %llu\n"
 			  "allow_unload: %d\nprotected_files: %d\n"
 			  "state_restored: %d\n"
-			  "pgp_active: %d\n",
+			  "pgp_active: %d\n"
+			  "allowed_ips: %d\n",
 			  READ_ONCE(enabled), READ_ONCE(blocked_count_v4),
 			  READ_ONCE(blocked_count_v6),
 			  READ_ONCE(blocked_domain_count),
 			  READ_ONCE(blocked_count_v4) + READ_ONCE(blocked_count_v6),
 			  remaining_seconds(), READ_ONCE(allow_unload),
 			  protection_count(), READ_ONCE(state_restored),
-			  READ_ONCE(pgp_active));
+			  READ_ONCE(pgp_active),
+			  READ_ONCE(allowed_count_v4) + READ_ONCE(allowed_count_v6));
 }
 
 static ssize_t enabled_show(struct kobject *kobj, struct kobj_attribute *attr,
@@ -256,6 +342,53 @@ out:
 	return ret;
 }
 
+static ssize_t allowed_ips_show(struct kobject *kobj, struct kobj_attribute *attr,
+				char *buf)
+{
+	return kb_format_allowed(buf, PAGE_SIZE, "\n");
+}
+
+static ssize_t allowed_ips_store(struct kobject *kobj, struct kobj_attribute *attr,
+				 const char *buf, size_t count)
+{
+	struct kb_net4 *tmp_v4;
+	struct kb_net6 *tmp_v6;
+	char *copy;
+	int n4, n6;
+	ssize_t ret = count;
+
+	tmp_v4 = kmalloc_array(MAX_ALLOWED_NETS, sizeof(*tmp_v4), GFP_KERNEL);
+	tmp_v6 = kmalloc_array(MAX_ALLOWED_NETS, sizeof(*tmp_v6), GFP_KERNEL);
+	copy = kmemdup_nul(buf, count, GFP_KERNEL);
+	if (!tmp_v4 || !tmp_v6 || !copy) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	if (kb_parse_allowed(copy, "\n", tmp_v4, &n4, tmp_v6, &n6)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* An allowlist exempts traffic, so it must not change mid-block */
+	mutex_lock(&kb_lock);
+	if (enabled) {
+		ret = -EPERM;
+	} else {
+		spin_lock_bh(&ip_list_lock);
+		memcpy(allowed_nets_v4, tmp_v4, n4 * sizeof(*tmp_v4));
+		memcpy(allowed_nets_v6, tmp_v6, n6 * sizeof(*tmp_v6));
+		WRITE_ONCE(allowed_count_v4, n4);
+		WRITE_ONCE(allowed_count_v6, n6);
+		spin_unlock_bh(&ip_list_lock);
+	}
+	kb_unlock();
+out:
+	kfree(tmp_v4);
+	kfree(tmp_v6);
+	kfree(copy);
+	return ret;
+}
+
 static ssize_t block_count_show(struct kobject *kobj, struct kobj_attribute *attr,
 				char *buf)
 {
@@ -274,6 +407,7 @@ static struct kobj_attribute enabled_attr = __ATTR_RW(enabled);
 static struct kobj_attribute remaining_attr = __ATTR_RO(remaining);
 static struct kobj_attribute blocked_ips_attr = __ATTR_RW(blocked_ips);
 static struct kobj_attribute blocked_domains_attr = __ATTR_RW(blocked_domains);
+static struct kobj_attribute allowed_ips_attr = __ATTR_RW(allowed_ips);
 static struct kobj_attribute block_count_attr = __ATTR_RO(block_count);
 static struct kobj_attribute unblock_attr = __ATTR_WO(unblock);
 static struct kobj_attribute key_attr = __ATTR(key, 0400, unload_key_show, NULL);
@@ -310,6 +444,7 @@ static struct attribute *attrs[] = {
 	&remaining_attr.attr,
 	&blocked_ips_attr.attr,
 	&blocked_domains_attr.attr,
+	&allowed_ips_attr.attr,
 	&block_count_attr.attr,
 	&unblock_attr.attr,
 	&key_attr.attr,

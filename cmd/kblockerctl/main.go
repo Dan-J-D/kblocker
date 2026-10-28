@@ -25,6 +25,7 @@ const (
 	moduleName         = "kblocker"
 	stateFile          = "/var/lib/kblocker/state"
 	blockedDomainsFile = "/etc/kblocker/domains.conf"
+	allowedIPsFile     = "/etc/kblocker/allowed_ips.conf"
 )
 
 var (
@@ -89,6 +90,8 @@ func main() {
 		doRemove(args)
 	case "block-ip":
 		doBlockIP(args)
+	case "allow-ip":
+		doAllowIP(args)
 	case "list":
 		doList()
 	case "key":
@@ -161,8 +164,13 @@ Usage:
   kblockerctl block-ip <ip> [<ip>...]
       Manually set blocked IPs (replaces existing list).
 
+  kblockerctl allow-ip <ip|cidr> [<ip|cidr>...] | --clear
+      Never block traffic to these addresses, e.g. a WireGuard subnet
+      (10.0.0.0/24). Replaces the existing list; saved to
+      /etc/kblocker/allowed_ips.conf and applied on every enable.
+
   kblockerctl list
-      Show blocked IPs and configured domains.
+      Show blocked IPs, allowed networks and configured domains.
 
   kblockerctl key
       Show unload key and PGP key fingerprints.
@@ -540,6 +548,11 @@ func doEnable(args []string) {
 		fmt.Printf("%sWriting %d domains to kernel...%s\n", colorCyan, len(domains), colorNC)
 		writeSysfsLines(sysfsBase+"/blocked_domains", domains)
 	}
+	if nets, err := readFileLines(allowedIPsFile); err == nil {
+		if err := writeSysfsLines(sysfsBase+"/allowed_ips", nets); err != nil {
+			fmt.Fprintf(os.Stderr, "%sWarning: could not apply %s: %v%s\n", colorYellow, allowedIPsFile, err, colorNC)
+		}
+	}
 
 	var numPGP int
 	if !insecure {
@@ -879,6 +892,7 @@ func doStatus() {
 	countV4 := parseField("blocked_ips_v4")
 	countV6 := parseField("blocked_ips_v6")
 	domainCount := parseField("blocked_domains")
+	allowedCount := parseField("allowed_ips")
 	protectCount := parseField("protected_files")
 	restoredState := parseField("state_restored")
 	pgpState := parseField("pgp_active")
@@ -908,6 +922,9 @@ func doStatus() {
 	}
 	fmt.Printf("  Blocked IPs: %d\n", totalIPs)
 	fmt.Printf("  Blocked domains: %s\n", domainCount)
+	if allowedCount != "" && allowedCount != "0" {
+		fmt.Printf("  Allowed networks: %s\n", allowedCount)
+	}
 	fmt.Printf("  Protected files: %s\n", protectCount)
 
 	if restoredState == "1" {
@@ -1095,6 +1112,73 @@ func doBlockIP(args []string) {
 	fmt.Printf("%sBlocked %d IPs (total in kernel: %s).%s\n", colorGreen, len(args), count, colorNC)
 }
 
+// normalizeNet accepts an IP or CIDR and returns it in CIDR form
+func normalizeNet(s string) (string, error) {
+	if !strings.Contains(s, "/") {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return "", fmt.Errorf("not an IP or CIDR: %s", s)
+		}
+		if ip.To4() != nil {
+			return ip.String() + "/32", nil
+		}
+		return ip.String() + "/128", nil
+	}
+	_, ipnet, err := net.ParseCIDR(s)
+	if err != nil {
+		return "", fmt.Errorf("not an IP or CIDR: %s", s)
+	}
+	return ipnet.String(), nil
+}
+
+func doAllowIP(args []string) {
+	requiresRoot()
+	requireModule()
+	requireDisabled()
+
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Error: specify at least one IP or CIDR to allow, or --clear.")
+		os.Exit(1)
+	}
+
+	var nets []string
+	if !(len(args) == 1 && args[0] == "--clear") {
+		for _, a := range args {
+			n, err := normalizeNet(a)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%sError: %v%s\n", colorRed, err, colorNC)
+				os.Exit(1)
+			}
+			nets = append(nets, n)
+		}
+	}
+
+	if err := writeSysfsLines(sysfsBase+"/allowed_ips", nets); err != nil {
+		fmt.Fprintf(os.Stderr, "%sFailed to write allowed IPs to kernel module: %v%s\n", colorRed, err, colorNC)
+		os.Exit(1)
+	}
+
+	os.MkdirAll("/etc/kblocker", 0755)
+	chattr(allowedIPsFile, "-i")
+	content := ""
+	if len(nets) > 0 {
+		content = strings.Join(nets, "\n") + "\n"
+	}
+	if err := os.WriteFile(allowedIPsFile, []byte(content), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "%sWarning: could not save %s: %v%s\n", colorYellow, allowedIPsFile, err, colorNC)
+	}
+	chattr(allowedIPsFile, "+i")
+
+	if len(nets) == 0 {
+		fmt.Printf("%sCleared allowed networks.%s\n", colorGreen, colorNC)
+		return
+	}
+	fmt.Printf("%sAllowed %d networks (never blocked):%s\n", colorGreen, len(nets), colorNC)
+	for _, n := range nets {
+		fmt.Println("  " + n)
+	}
+}
+
 func doList() {
 	if !moduleLoaded() {
 		fmt.Println("kblocker: NOT LOADED")
@@ -1109,6 +1193,15 @@ func doList() {
 		fmt.Println("(empty)")
 	} else {
 		fmt.Print(string(ips))
+	}
+	fmt.Println()
+
+	fmt.Println("=== Allowed Networks (never blocked) ===")
+	allowed, err := os.ReadFile(sysfsBase + "/allowed_ips")
+	if err != nil || len(strings.TrimSpace(string(allowed))) == 0 {
+		fmt.Println("(empty)")
+	} else {
+		fmt.Print(string(allowed))
 	}
 	fmt.Println()
 

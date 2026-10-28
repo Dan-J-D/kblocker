@@ -11,6 +11,7 @@ const fresh = params.get("state") === "new";
 let endsAt = startActive ? Date.now() + 102 * 60_000 : 0;
 let pgp = startActive;
 
+let allowedIps = fresh ? [] : ["10.0.0.0/24"];
 let domains = ["facebook.com", "instagram.com", "x.com", "twitter.com", "tiktok.com", "reddit.com"];
 
 let holders: KeyHolder[] = fresh ? [] : [
@@ -82,6 +83,7 @@ function status(): Status {
     protected_files: remaining > 0 ? 4 : 0,
     blocked_ips: 0,
     domains: [...domains],
+    allowed_ips: [...allowedIps],
     scheduler_active: true,
     web_url:
       webMode === "off" ? null : `http://${{ local: "127.0.0.1", lan: "192.168.1.20", custom: webHost }[webMode]}:${webPort}`,
@@ -129,6 +131,9 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       return undefined as T;
     case "set_domains":
       domains = a.domains;
+      return undefined as T;
+    case "set_allowed_ips":
+      allowedIps = a.nets;
       return undefined as T;
     case "save_schedule":
       schedule = JSON.parse(JSON.stringify(a.schedule));

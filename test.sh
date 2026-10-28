@@ -285,6 +285,69 @@ check grep -q '^blocked_ips_v4: 0$' < "$SYSFS/status"
 check grep -q '^blocked_ips_v6: 2$' < "$SYSFS/status"
 check grep -q ':' < "$SYSFS/blocked_ips"
 
+# --- allowed_ips ---
+echo "--- allowed_ips ---"
+check grep -q '^allowed_ips: 0$' < "$SYSFS/status"
+cat > "$SYSFS/allowed_ips" << 'EOF'
+10.0.0.255/24
+# comment
+10.0.0.255
+fd00::1/64
+EOF
+check grep -q '^allowed_ips: 3$' < "$SYSFS/status"
+# host bits cleared, bare addresses become /32
+check grep -qx '10.0.0.0/24' < "$SYSFS/allowed_ips"
+check grep -qx '10.0.0.255/32' < "$SYSFS/allowed_ips"
+check grep -qx 'fd00::/64' < "$SYSFS/allowed_ips"
+# an invalid entry rejects the whole write and keeps the old list
+for bad in "10.0.0.0/33" "fd00::/129" "10.0.0.0/" "not-an-ip" "10.0.0.1/24x"; do
+    if echo "$bad" > "$SYSFS/allowed_ips" 2>/dev/null; then
+        fail "allowed_ips: '$bad' accepted"
+    else
+        ok "allowed_ips: '$bad' rejected"
+    fi
+done
+check grep -q '^allowed_ips: 3$' < "$SYSFS/status"
+
+# allowed destinations skip the IP block list
+if command -v nc &>/dev/null; then
+    echo "127.0.0.2" > "$SYSFS/blocked_ips"
+    echo "127.0.0.0/8" > "$SYSFS/allowed_ips"
+    echo "10" > "$SYSFS/enabled"
+    nc -l 127.0.0.2 9998 &
+    L_PID=$!
+    sleep 0.2
+    if timeout 2 bash -c "echo ok > /dev/tcp/127.0.0.2/9998" 2>/dev/null; then
+        ok "allowed_ips: allowed destination connects despite blocked_ips"
+    else
+        fail "allowed_ips: allowed destination was blocked"
+    fi
+    kill $L_PID 2>/dev/null || true
+    echo "0" > "$SYSFS/enabled"
+    echo "" > "$SYSFS/blocked_ips"
+fi
+
+# allow-ip saves its config; keep any existing one
+ALLOW_CONF=/etc/kblocker/allowed_ips.conf
+ALLOW_BACKUP=""
+if [[ -f $ALLOW_CONF ]]; then
+    ALLOW_BACKUP=$(mktemp)
+    cp "$ALLOW_CONF" "$ALLOW_BACKUP"
+fi
+"$PWD/kblockerctl" allow-ip 10.0.0.0/24 >/dev/null 2>&1
+check grep -q '^allowed_ips: 1$' < "$SYSFS/status"
+check grep -qx '10.0.0.0/24' < "$ALLOW_CONF"
+"$PWD/kblockerctl" allow-ip --clear >/dev/null 2>&1
+check grep -q '^allowed_ips: 0$' < "$SYSFS/status"
+chattr -i "$ALLOW_CONF" 2>/dev/null || true
+if [[ -n $ALLOW_BACKUP ]]; then
+    cp "$ALLOW_BACKUP" "$ALLOW_CONF"
+    rm -f "$ALLOW_BACKUP"
+    chattr +i "$ALLOW_CONF" 2>/dev/null || true
+else
+    rm -f "$ALLOW_CONF"
+fi
+
 # --- blocked_domains round-trip ---
 echo "--- blocked_domains ---"
 cat > "$SYSFS/blocked_domains" << 'EOF'
@@ -571,6 +634,14 @@ else
     ok "bypass: blocked_ips write rejected while enabled"
 fi
 check grep -q '^blocked_ips_v4: 0$' < "$SYSFS/status"
+
+# Can't widen the allowlist while enabled
+if echo "0.0.0.0/0" > "$SYSFS/allowed_ips" 2>/dev/null; then
+    fail "bypass: allowed_ips write accepted while enabled"
+else
+    ok "bypass: allowed_ips write rejected while enabled"
+fi
+check grep -q '^allowed_ips: 0$' < "$SYSFS/status"
 
 # Can't bypass PGP via enabled sysfs (0 should be blocked when PGP active)
 if echo "0" > "$SYSFS/enabled" 2>/dev/null; then

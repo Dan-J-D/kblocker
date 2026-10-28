@@ -11,6 +11,8 @@ export interface Status {
   protected_files: number;
   blocked_ips: number;
   domains: string[];
+  /** Networks that are never blocked, in CIDR form */
+  allowed_ips: string[];
   scheduler_active: boolean;
   /** Base URL of the key holder pages hosted by the scheduler service */
   web_url: string | null;
@@ -75,6 +77,7 @@ export const api = {
   unload: (key: string) => invoke<void>("unload", { key }),
   setDomains: (domains: string[], removed?: string) =>
     invoke<void>("set_domains", { domains, removed: removed ?? null }),
+  setAllowedIps: (nets: string[]) => invoke<void>("set_allowed_ips", { nets }),
   reload: () => invoke<void>("reload"),
   setWebPages: (mode: WebMode, bind?: string, port?: number) =>
     invoke<void>("set_web_pages", { mode, bind: bind ?? null, port: port ?? null }),

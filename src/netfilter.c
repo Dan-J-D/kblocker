@@ -76,6 +76,33 @@ static bool is_ipv6_blocked(const struct in6_addr *addr)
 }
 #endif
 
+static bool is_ip_allowed(__be32 addr)
+{
+	int i;
+	bool found = false;
+
+	spin_lock_bh(&ip_list_lock);
+	for (i = 0; i < allowed_count_v4 && !found; i++)
+		found = (addr & allowed_nets_v4[i].mask) == allowed_nets_v4[i].addr;
+	spin_unlock_bh(&ip_list_lock);
+	return found;
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+static bool is_ipv6_allowed(const struct in6_addr *addr)
+{
+	int i;
+	bool found = false;
+
+	spin_lock_bh(&ip_list_lock);
+	for (i = 0; i < allowed_count_v6 && !found; i++)
+		found = ipv6_prefix_equal(addr, &allowed_nets_v6[i].addr,
+					  allowed_nets_v6[i].plen);
+	spin_unlock_bh(&ip_list_lock);
+	return found;
+}
+#endif
+
 /* kb_domain_matches(): x.com blocks www.x.com but not netflix.com */
 static bool domain_list_contains(const char *hostname)
 {
@@ -165,6 +192,10 @@ static unsigned int kblocker_hook_v4(struct sk_buff *skb)
 	if (!iph || iph->ihl < 5)
 		return NF_ACCEPT;
 
+	/* Allowed destinations skip every check, including QUIC */
+	if (READ_ONCE(allowed_count_v4) && is_ip_allowed(iph->daddr))
+		return NF_ACCEPT;
+
 	if (READ_ONCE(blocked_count_v4) && is_ip_blocked(iph->daddr))
 		return NF_DROP;
 
@@ -194,6 +225,9 @@ static unsigned int kblocker_hook_v6(struct sk_buff *skb)
 
 	ip6h = skb_header_pointer(skb, noff, sizeof(_ip6h), &_ip6h);
 	if (!ip6h)
+		return NF_ACCEPT;
+
+	if (READ_ONCE(allowed_count_v6) && is_ipv6_allowed(&ip6h->daddr))
 		return NF_ACCEPT;
 
 	if (READ_ONCE(blocked_count_v6) && is_ipv6_blocked(&ip6h->daddr))
