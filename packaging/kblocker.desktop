@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=kblocker
+GenericName=Site Blocker
+Comment=Block distracting sites at the kernel level
+Exec=/usr/local/bin/kblocker
+Icon=kblocker
+Terminal=false
+Categories=Utility;
+Keywords=block;focus;distraction;internet;

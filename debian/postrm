@@ -9,6 +9,8 @@ case "$1" in
             find /var/lib/kblocker -type f -exec chattr -i {} \; 2>/dev/null || true
         fi
         rm -rf /var/lib/kblocker
+        update-desktop-database -q /usr/share/applications 2>/dev/null || true
+        gtk-update-icon-cache -q -t /usr/share/icons/hicolor 2>/dev/null || true
         systemctl daemon-reload 2>/dev/null || true
         ;;
     purge)

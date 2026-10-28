@@ -25,6 +25,10 @@ case "$1" in
         modprobe kblocker 2>/dev/null || \
             echo "Warning: could not load kblocker module. Reboot or run 'modprobe kblocker'." >&2
 
+        # Desktop launcher for the app
+        update-desktop-database -q /usr/share/applications 2>/dev/null || true
+        gtk-update-icon-cache -q -t /usr/share/icons/hicolor 2>/dev/null || true
+
         systemctl daemon-reload 2>/dev/null || true
         systemctl enable --now kblocker-scheduler.service 2>/dev/null || true
 

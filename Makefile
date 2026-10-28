@@ -44,6 +44,13 @@ deb: kblockerctl $(GUI_BIN)
 	install -d "$$PKG_DIR/usr/local/bin"; \
 	install -m 755 kblockerctl "$$PKG_DIR/usr/local/bin/kblockerctl"; \
 	install -m 755 $(GUI_BIN) "$$PKG_DIR/usr/local/bin/kblocker"; \
+	install -D -m 644 packaging/kblocker.desktop "$$PKG_DIR/usr/share/applications/kblocker.desktop"; \
+	for size in 32 64 128; do \
+		install -D -m 644 gui/src-tauri/icons/$${size}x$${size}.png "$$PKG_DIR/usr/share/icons/hicolor/$${size}x$${size}/apps/kblocker.png"; \
+	done; \
+	install -D -m 644 gui/src-tauri/icons/128x128@2x.png "$$PKG_DIR/usr/share/icons/hicolor/256x256/apps/kblocker.png"; \
+	install -D -m 644 gui/src-tauri/icons/icon.png "$$PKG_DIR/usr/share/icons/hicolor/512x512/apps/kblocker.png"; \
+	install -D -m 644 gui/src-tauri/icons/icon.svg "$$PKG_DIR/usr/share/icons/hicolor/scalable/apps/kblocker.svg"; \
 	install -d "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}"; \
 	cp -a src dkms.conf Makefile "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}/"; \
 	find "$$PKG_DIR/usr/src/kblocker-$${VERSION%-*}/src" -name '*.o' -o -name '*.o.cmd' -o -name '*.mod.c' -o -name '*.ko' -o -name '*.mod' | xargs rm -f 2>/dev/null || true; \
