@@ -132,6 +132,16 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
     case "set_domains":
       domains = a.domains;
       return undefined as T;
+    case "reset":
+      domains = ["facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com", "x.com", "twitter.com",
+        "twimg.com", "tiktok.com", "tiktokcdn.com", "reddit.com", "redd.it", "snapchat.com", "threads.net", "bsky.app"];
+      allowedIps = [];
+      schedule = { blocks: [] };
+      webMode = "local";
+      webPort = 8737;
+      if (a.history) history.length = 0;
+      if (a.keyHolders) holders = [];
+      return undefined as T;
     case "set_allowed_ips":
       allowedIps = a.nets;
       return undefined as T;

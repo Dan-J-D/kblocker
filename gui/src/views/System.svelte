@@ -11,6 +11,10 @@
   let confirmUnload = $state(false);
   let reloading = $state(false);
   let unloading = $state(false);
+  let confirmReset = $state(false);
+  let resetting = $state(false);
+  let resetHistory = $state(false);
+  let resetHolders = $state(false);
 
   let s = $derived(app.status);
   let keyValid = $derived(/^[0-9a-f]{32}$/i.test(unloadKey.trim()));
@@ -19,6 +23,19 @@
     reloading = true;
     await app.act(() => api.reload(), "Sites re-sent to the kernel.");
     reloading = false;
+  }
+
+  function openReset() {
+    resetHistory = false;
+    resetHolders = false;
+    confirmReset = true;
+  }
+
+  async function reset() {
+    confirmReset = false;
+    resetting = true;
+    await app.act(() => api.reset(resetHistory, resetHolders), "Reset to defaults.");
+    resetting = false;
   }
 
   async function unload() {
@@ -83,6 +100,21 @@
         {#if reloading}<Spinner />{/if}Reload
       </button>
     </div>
+    <div class="flex items-center justify-between gap-6 border-b border-line-soft px-5 py-4">
+      <div>
+        <p>Reset to defaults</p>
+        <p class="mt-0.5 text-sm text-muted">
+          {#if app.blocking}
+            Not available during a block.
+          {:else}
+            Put sites, allowed networks and the schedule back to how a fresh install leaves them.
+          {/if}
+        </p>
+      </div>
+      <button class="btn-quiet shrink-0" disabled={resetting || app.blocking || !s?.ctl_installed} onclick={openReset}>
+        {#if resetting}<Spinner />{/if}Reset…
+      </button>
+    </div>
     <div class="px-5 py-4">
       <p>Unload the module</p>
       <p class="mt-0.5 max-w-[62ch] text-sm text-muted">
@@ -113,5 +145,34 @@
   {#snippet actions()}
     <button class="btn-ghost" onclick={() => (confirmUnload = false)}>Cancel</button>
     <button class="btn-danger" onclick={unload}><Icon name="alert" size={15} />Unload module</button>
+  {/snippet}
+</Dialog>
+
+<Dialog open={confirmReset} title="Reset to defaults?" onclose={() => (confirmReset = false)}>
+  <ul class="list-disc space-y-1 pl-5">
+    <li>Sites go back to the starter social media list.</li>
+    <li>Allowed networks and blocked IPs are removed.</li>
+    <li>Every scheduled block is removed.</li>
+    <li>Key holder pages go back to this computer only.</li>
+  </ul>
+  <div class="mt-4 space-y-3 border-t border-line-soft pt-4">
+    <label class="flex cursor-pointer items-start gap-3">
+      <input type="checkbox" class="mt-1 shrink-0" bind:checked={resetHistory} />
+      <span>
+        <span class="text-text">Also delete history</span>
+        <span class="block text-sm">Every past block and your streaks.</span>
+      </span>
+    </label>
+    <label class="flex cursor-pointer items-start gap-3">
+      <input type="checkbox" class="mt-1 shrink-0" bind:checked={resetHolders} />
+      <span>
+        <span class="text-text">Also remove key holders</span>
+        <span class="block text-sm">You'll need to add them again before starting a locked block.</span>
+      </span>
+    </label>
+  </div>
+  {#snippet actions()}
+    <button class="btn-ghost" onclick={() => (confirmReset = false)}>Cancel</button>
+    <button class="btn-danger" onclick={reset}><Icon name="alert" size={15} />Reset to defaults</button>
   {/snippet}
 </Dialog>

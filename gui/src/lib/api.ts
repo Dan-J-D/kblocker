@@ -79,6 +79,7 @@ export const api = {
     invoke<void>("set_domains", { domains, removed: removed ?? null }),
   setAllowedIps: (nets: string[]) => invoke<void>("set_allowed_ips", { nets }),
   reload: () => invoke<void>("reload"),
+  reset: (history: boolean, keyHolders: boolean) => invoke<void>("reset", { history, keyHolders }),
   setWebPages: (mode: WebMode, bind?: string, port?: number) =>
     invoke<void>("set_web_pages", { mode, bind: bind ?? null, port: port ?? null }),
   saveSchedule: (schedule: Schedule) => invoke<void>("save_schedule", { schedule }),

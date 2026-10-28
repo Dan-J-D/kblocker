@@ -416,6 +416,19 @@ async fn set_domains(domains: Vec<String>, removed: Option<String>) -> Result<()
     ctl_async(args, None).await.map(|_| ())
 }
 
+/// Back to a fresh install's settings; history and key holders only when asked
+#[tauri::command]
+async fn reset(history: bool, key_holders: bool) -> Result<(), String> {
+    let mut args = vec!["reset".to_string(), "--yes".into()];
+    if history {
+        args.push("--history".into());
+    }
+    if key_holders {
+        args.push("--key-holders".into());
+    }
+    ctl_async(args, None).await.map(|_| ())
+}
+
 #[tauri::command]
 async fn set_allowed_ips(nets: Vec<String>) -> Result<(), String> {
     let mut args = vec!["allow-ip".to_string()];
@@ -541,6 +554,7 @@ pub fn run() {
             unload,
             set_domains,
             set_allowed_ips,
+            reset,
             reload,
             set_web_pages,
             save_schedule,

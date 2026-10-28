@@ -11,6 +11,7 @@ Every command is run as root: `sudo kblockerctl <command>`.
 | `unload [--key <hex>]` | Permanently remove the module. Needs the unblock key |
 | `status` | Show blocking state, remaining time, protected files |
 | `crash` | Force-remove module (triggers kernel panic) |
+| `reset [--history] [--key-holders] [--yes]` | Back to a fresh install's settings: the starter site list, no allowed networks or blocked IPs, no schedule, key holder pages on this computer only. `--history` and `--key-holders` also delete those. Asks you to type `reset` unless `--yes`; refused while blocking is active. Also under System → Maintenance in the desktop app |
 
 ## Sites and IPs
 

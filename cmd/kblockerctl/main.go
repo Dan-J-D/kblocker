@@ -92,6 +92,8 @@ func main() {
 		doBlockIP(args)
 	case "allow-ip":
 		doAllowIP(args)
+	case "reset":
+		doReset(args)
 	case "list":
 		doList()
 	case "key":
@@ -171,6 +173,12 @@ Usage:
 
   kblockerctl list
       Show blocked IPs, allowed networks and configured domains.
+
+  kblockerctl reset [--history] [--key-holders] [--yes]
+      Reset to defaults: the starter site list, no allowed networks or
+      blocked IPs, no schedule, key holder pages on this computer only.
+      --history and --key-holders also delete those. Asks to confirm
+      unless --yes is given. Not allowed while blocking is active.
 
   kblockerctl key
       Show unload key and PGP key fingerprints.
