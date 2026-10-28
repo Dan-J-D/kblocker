@@ -134,12 +134,14 @@ fn status() -> Status {
         .collect();
     let num = |k: &str| fields.get(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
 
-    // The config file is what enable writes to the kernel; prefer it, and
-    // fall back to the kernel's list when there is no config yet.
-    let mut domains = read_lines(DOMAINS_FILE);
-    if domains.is_empty() {
-        domains = read_lines(&format!("{SYSFS}/blocked_domains"));
-    }
+    // The config file is what enable writes to the kernel; use it, and
+    // fall back to the kernel's list only when there is no config yet. An
+    // empty config means no sites, not "ask the kernel".
+    let domains = if Path::new(DOMAINS_FILE).exists() {
+        read_lines(DOMAINS_FILE)
+    } else {
+        read_lines(&format!("{SYSFS}/blocked_domains"))
+    };
 
     // Same for the allowlist: enable applies the config file when it exists
     let allowed_ips = if Path::new(ALLOWED_FILE).exists() {

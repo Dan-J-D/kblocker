@@ -110,7 +110,8 @@ install: module kblockerctl
 	fi
 	modprobe kblocker 2>/dev/null || true
 	@systemctl daemon-reload 2>/dev/null && systemctl enable --now kblocker-scheduler.service 2>/dev/null || true
-	@/usr/local/bin/kblockerctl block facebook.com fbcdn.net instagram.com cdninstagram.com x.com twitter.com twimg.com tiktok.com tiktokcdn.com reddit.com redd.it snapchat.com threads.net bsky.app 2>/dev/null || true
+	@# Starter list on a fresh install only; reinstalling keeps your sites
+	@[ -e /etc/kblocker/domains.conf ] || /usr/local/bin/kblockerctl block facebook.com fbcdn.net instagram.com cdninstagram.com x.com twitter.com twimg.com tiktok.com tiktokcdn.com reddit.com redd.it snapchat.com threads.net bsky.app 2>/dev/null || true
 	@echo ""
 	@echo "kblocker installed (disabled by default)."
 	@echo "  kblockerctl enable 60   — block for 60 minutes"

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -26,6 +27,7 @@ const (
 	stateFile          = "/var/lib/kblocker/state"
 	blockedDomainsFile = "/etc/kblocker/domains.conf"
 	allowedIPsFile     = "/etc/kblocker/allowed_ips.conf"
+	maxDomains         = 64 // MAX_DOMAINS in src/kblocker.h
 )
 
 var (
@@ -475,6 +477,41 @@ func readKernelDomains() []string {
 	return domains
 }
 
+// currentDomains is the configured site list. The kernel's copy is empty
+// after a reboot or module reload until enable, so it is only used when
+// there is no config file yet.
+func currentDomains() []string {
+	if _, err := os.Stat(blockedDomainsFile); err == nil {
+		return readDomainConfigFile()
+	}
+	return readKernelDomains()
+}
+
+// applyDomains replaces the site list in the kernel and, only if the
+// kernel accepted it, in the config file.
+func applyDomains(domains []string) error {
+	// A zero-length write never reaches the kernel, so an empty list is "\n"
+	err := writeSysfsLines(sysfsBase+"/blocked_domains", domains)
+	if errors.Is(err, syscall.EINVAL) {
+		return fmt.Errorf("the kernel accepts at most %d sites, each a valid domain name", maxDomains)
+	}
+	if errors.Is(err, syscall.EPERM) {
+		return fmt.Errorf("sites can't be changed while blocking is active")
+	}
+	if err != nil {
+		return err
+	}
+	syncConfigFromKernel()
+	return nil
+}
+
+func applyDomainsOrExit(domains []string) {
+	if err := applyDomains(domains); err != nil {
+		fmt.Fprintf(os.Stderr, "%sError: %v%s\n", colorRed, err, colorNC)
+		os.Exit(1)
+	}
+}
+
 func syncConfigFromKernel() {
 	domains := readKernelDomains()
 	os.MkdirAll("/etc/kblocker", 0755)
@@ -727,10 +764,7 @@ func doBlock(args []string) {
 	requireDisabled()
 
 	fmt.Printf("%sWriting %d domains to kernel module...%s\n", colorCyan, len(args), colorNC)
-	writeSysfsLines(sysfsBase+"/blocked_domains", args)
-
-	fmt.Printf("%sSaving domain configuration...%s\n", colorCyan, colorNC)
-	syncConfigFromKernel()
+	applyDomainsOrExit(args)
 
 	fmt.Printf("%sConfigured %d domains. Run 'kblockerctl enable' to activate.%s\n", colorGreen, len(args), colorNC)
 }
@@ -1049,7 +1083,7 @@ func doAdd(args []string) {
 	}
 	domain := args[0]
 
-	domains := readKernelDomains()
+	domains := currentDomains()
 	for _, d := range domains {
 		if d == domain {
 			fmt.Printf("%s is already blocked.\n", domain)
@@ -1057,9 +1091,7 @@ func doAdd(args []string) {
 		}
 	}
 
-	domains = append(domains, domain)
-	writeSysfsLines(sysfsBase+"/blocked_domains", domains)
-	syncConfigFromKernel()
+	applyDomainsOrExit(append(domains, domain))
 
 	fmt.Printf("Added %s. Run 'kblockerctl enable' to activate.\n", domain)
 }
@@ -1075,7 +1107,7 @@ func doRemove(args []string) {
 	}
 	domain := args[0]
 
-	domains := readKernelDomains()
+	domains := currentDomains()
 	var newDomains []string
 	found := false
 	for _, d := range domains {
@@ -1091,12 +1123,7 @@ func doRemove(args []string) {
 		return
 	}
 
-	if len(newDomains) == 0 {
-		writeSysfs(sysfsBase+"/blocked_domains", "")
-	} else {
-		writeSysfsLines(sysfsBase+"/blocked_domains", newDomains)
-	}
-	syncConfigFromKernel()
+	applyDomainsOrExit(newDomains)
 
 	fmt.Printf("Removed %s. Run 'kblockerctl enable' to activate.\n", domain)
 }

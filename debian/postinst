@@ -32,10 +32,13 @@ case "$1" in
         systemctl daemon-reload 2>/dev/null || true
         systemctl enable --now kblocker-scheduler.service 2>/dev/null || true
 
-        # Default block list: social media
-        /usr/local/bin/kblockerctl block facebook.com fbcdn.net instagram.com \
-            cdninstagram.com x.com twitter.com twimg.com tiktok.com tiktokcdn.com \
-            reddit.com redd.it snapchat.com threads.net bsky.app 2>/dev/null || true
+        # Default block list: social media, on a fresh install only so
+        # upgrades keep the user's sites
+        if [ ! -e /etc/kblocker/domains.conf ]; then
+            /usr/local/bin/kblockerctl block facebook.com fbcdn.net instagram.com \
+                cdninstagram.com x.com twitter.com twimg.com tiktok.com tiktokcdn.com \
+                reddit.com redd.it snapchat.com threads.net bsky.app 2>/dev/null || true
+        fi
 
         echo "kblocker installed (disabled by default)."
         echo "  kblockerctl enable 60   — block for 60 minutes"
