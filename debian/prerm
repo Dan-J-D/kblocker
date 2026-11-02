@@ -4,7 +4,6 @@ set -e
 case "$1" in
     remove|upgrade|deconfigure)
         systemctl disable --now kblocker-scheduler.service 2>/dev/null || true
-        dkms remove kblocker/2.0 --all 2>/dev/null || true
 
         if [ -d /sys/kernel/kblocker ]; then
             echo 0 > /sys/kernel/kblocker/enabled 2>/dev/null || true
@@ -34,5 +33,9 @@ case "$1" in
         if grep -q "$HOSTS_MARKER" /etc/hosts 2>/dev/null; then
             sed -i "/$HOSTS_MARKER/,/^$/d" /etc/hosts
         fi
+
+        # Last, so a failure above (module still loaded and protecting its
+        # files) aborts the removal with the module still installed
+        dkms remove kblocker/2.0 --all 2>/dev/null || true
         ;;
 esac
