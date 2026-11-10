@@ -119,7 +119,15 @@ fn scheduler_web_url(addr: &str) -> Option<String> {
             .unwrap_or_else(|_| "127.0.0.1".into()),
         h => h.to_string(),
     };
-    Some(format!("http://{host}:{port}"))
+    // Other devices get the pages over https, the only way their browsers
+    // let the pages use WebCrypto; localhost stays on http
+    let loopback = host == "localhost"
+        || host
+            .trim_matches(|c| c == '[' || c == ']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    let scheme = if loopback { "http" } else { "https" };
+    Some(format!("{scheme}://{host}:{port}"))
 }
 
 #[tauri::command]

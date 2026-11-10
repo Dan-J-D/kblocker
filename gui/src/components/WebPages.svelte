@@ -188,9 +188,12 @@
     holder's phone or laptop.
   {:else if mode === "custom"}
     Listens on this one address only, such as this computer's address on a VPN.
-    The setting is saved and survives restarts.
+    The setting is saved and survives restarts. Browsers warn about the page's
+    self-signed certificate the first time; accepting it lets them continue.
   {:else}
     Any device on your network can open it. Unlocking still needs a key holder's
-    private key, and keys added during a block can't unlock that block.
+    private key, and keys added during a block can't unlock that block. Browsers
+    warn about the page's self-signed certificate the first time; accepting it
+    lets them continue.
   {/if}
 </p>

@@ -122,7 +122,15 @@ the key holder pages on `http://127.0.0.1:8737` (`/keys` to create and register 
 `/unblock` to decrypt the unload key in the browser and end a block).
 `sudo kblockerctl web-pages lan` opens them to other devices on your network,
 `local` limits them to this computer again, `custom --bind <ip>` listens on one
-address you choose (a VPN address, say) and `off` turns them off. Add `--port <port>`
+address you choose (a VPN address, say) and `off` turns them off. Browsers only let
+the pages use WebCrypto, which OpenPGP.js needs, on https or localhost, so when other
+devices can reach the pages they're also served over https on the same port, and plain
+http requests for anything but localhost are redirected there. The certificate is
+self-signed and kept in `/var/lib/kblocker/web-cert.pem` (key in `web-key.pem`), so each
+device warns about it the first time; accepting it lets them continue. It's renewed a
+month before it expires, or when this computer gets a new address. Its SHA-256
+fingerprint is in the service log (`journalctl -u kblocker-scheduler | grep certificate`)
+for comparing with what a browser shows. Add `--port <port>`
 to any of them to move the pages; otherwise the port is kept. The setting is saved in
 a drop-in for the service, and `add-pgp-web` / `unblock-web` use the same address by
 default. All of it is also on the desktop app's Key holders and System pages. The pages

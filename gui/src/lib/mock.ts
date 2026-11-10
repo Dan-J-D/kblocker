@@ -86,7 +86,9 @@ function status(): Status {
     allowed_ips: [...allowedIps],
     scheduler_active: true,
     web_url:
-      webMode === "off" ? null : `http://${{ local: "127.0.0.1", lan: "192.168.1.20", custom: webHost }[webMode]}:${webPort}`,
+      webMode === "off"
+        ? null
+        : `${webMode === "local" ? "http" : "https"}://${{ local: "127.0.0.1", lan: "192.168.1.20", custom: webHost }[webMode]}:${webPort}`,
     web_mode: webMode,
     web_host: webMode === "custom" ? webHost : webMode === "lan" ? "0.0.0.0" : "127.0.0.1",
     web_port: webPort,

@@ -1556,30 +1556,34 @@ func doWeb(args []string) {
 	listener, bind := listenPages(args, "/keys")
 	addr := listener.Addr().String()
 
-	fmt.Printf("%sKblocker key web UI on http://%s%s\n", colorCyan, addr, colorNC)
+	fmt.Printf("%sKblocker key web UI on %s%s\n", colorCyan, pagesURL(addr), colorNC)
 	if ip := net.ParseIP(bind); ip != nil && ip.IsLoopback() {
 		fmt.Println("  Binds to localhost only. Do not expose publicly.")
+	} else {
+		fmt.Println("  " + selfSignedNote)
 	}
 	if os.Geteuid() != 0 {
 		fmt.Println("  WARNING: Not root — PGP key writes will fail.")
 	}
 
-	log.Fatal(http.Serve(listener, withSameOrigin(newWebMux("keys"))))
+	log.Fatal(servePages(listener, "keys"))
 }
 
 func doUnblockWeb(args []string) {
 	listener, bind := listenPages(args, "/unblock")
 	addr := listener.Addr().String()
 
-	fmt.Printf("%sKblocker unblock-web UI on http://%s%s\n", colorCyan, addr, colorNC)
+	fmt.Printf("%sKblocker unblock-web UI on %s%s\n", colorCyan, pagesURL(addr), colorNC)
 	if ip := net.ParseIP(bind); ip != nil && ip.IsLoopback() {
 		fmt.Println("  Binds to localhost only. Do not expose publicly.")
+	} else {
+		fmt.Println("  " + selfSignedNote)
 	}
 	if os.Geteuid() != 0 {
 		fmt.Println("  WARNING: Not root — unblock writes will fail.")
 	}
 
-	log.Fatal(http.Serve(listener, withSameOrigin(newWebMux("unblock"))))
+	log.Fatal(servePages(listener, "unblock"))
 }
 
 // ---- Web server handlers ----
@@ -1683,6 +1687,7 @@ input:focus { outline: none; border-color: #58a6ff; }
 </div>
 
 <script src="/openpgp.min.js"></script>
+` + openpgpCheckJS + `
 <script>
 let generatedPrivKey = '';
 let generatedPubKey = '';
@@ -1812,6 +1817,11 @@ document.getElementById('download-pub-btn').addEventListener('click', function()
   URL.revokeObjectURL(url);
   showSuccess('Public key downloaded! Save it somewhere safe to decrypt the unload key later.');
 });
+
+if (openpgpProblem()) {
+  showError(openpgpProblem());
+  document.getElementById('generate-btn').disabled = true;
+}
 
 loadStatus();
 setInterval(loadStatus, 5000);
@@ -2238,6 +2248,7 @@ xsBNBGQ..."></textarea>
 </div>
 
 <script src="/openpgp.min.js"></script>
+` + openpgpCheckJS + `
 <script>
 function loadKeyFile(event) {
   var file = event.target.files[0];
@@ -2362,6 +2373,11 @@ async function loadUnblockStatus() {
   } catch (e) {
     document.getElementById('status-content').innerHTML = '<span class="error">' + e.message + '</span>';
   }
+}
+
+if (openpgpProblem()) {
+  showUnblockError(openpgpProblem());
+  document.getElementById('decrypt-btn').disabled = true;
 }
 
 loadUnblockStatus();

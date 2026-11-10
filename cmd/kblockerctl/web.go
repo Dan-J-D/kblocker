@@ -23,6 +23,27 @@ import (
 //go:embed assets/openpgp.min.js
 var openpgpJS []byte
 
+// selfSignedNote is printed wherever the pages start serving https.
+const selfSignedNote = "Browsers warn about the pages' self-signed certificate the first time; accept it to continue."
+
+// openpgpCheckJS goes right after the OpenPGP.js script tag. OpenPGP.js
+// needs WebCrypto, which browsers only expose on secure pages: https://, or
+// http:// on localhost and 127.0.0.1. Opened as http://<LAN address> the
+// library throws while loading and leaves openpgp undefined, so the pages
+// call openpgpProblem() up front and explain that instead. servePages
+// redirects such visits to https, so this is a fallback.
+const openpgpCheckJS = `<script>
+function openpgpProblem() {
+  if (typeof openpgp !== 'undefined') return '';
+  if (!window.isSecureContext) {
+    return 'This browser blocks the encryption this page needs, because the page was opened over plain http. ' +
+      'Browsers only allow it on https:// pages and on localhost. ' +
+      'Open https://' + location.host + location.pathname + ' instead.';
+  }
+  return 'OpenPGP.js failed to load in this browser. Reload the page, or try a current Firefox, Chrome or Safari.';
+}
+</script>`
+
 const defaultWebAddr = "127.0.0.1:8737"
 
 // newWebMux serves both pages; root picks which one "/" shows.
@@ -101,9 +122,9 @@ func startDaemonWeb() {
 		log.Printf("web pages disabled: %v", err)
 		return
 	}
-	log.Printf("key and unblock pages on http://%s/keys and http://%s/unblock", addr, addr)
+	log.Printf("key and unblock pages on %s/keys and %s/unblock", pagesURL(addr), pagesURL(addr))
 	go func() {
-		if err := http.Serve(ln, withSameOrigin(newWebMux(""))); err != nil {
+		if err := servePages(ln, ""); err != nil {
 			log.Printf("web server stopped: %v", err)
 		}
 	}()
@@ -193,7 +214,7 @@ func listenPages(args []string, path string) (net.Listener, string) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		if !explicit && saved != "off" && errors.Is(err, syscall.EADDRINUSE) {
-			fmt.Printf("The scheduler service already hosts this page on http://%s%s\n", addr, path)
+			fmt.Printf("The scheduler service already hosts this page on %s%s\n", pagesURL(addr), path)
 			os.Exit(0)
 		}
 		log.Fatalf("Failed to listen on %s: %v", addr, err)
@@ -267,8 +288,10 @@ func doWebPages(args []string) {
 	case "local":
 		fmt.Printf("Key holder pages on http://%s (this computer only).\n", addr)
 	case "lan":
-		fmt.Printf("Key holder pages on port %s for every device on your network.\n", port)
+		fmt.Printf("Key holder pages on https://<this computer's IP>:%s for every device on your network.\n", port)
+		fmt.Println(selfSignedNote)
 	default:
-		fmt.Printf("Key holder pages on http://%s.\n", addr)
+		fmt.Printf("Key holder pages on %s.\n", pagesURL(addr))
+		fmt.Println(selfSignedNote)
 	}
 }

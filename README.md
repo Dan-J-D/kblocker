@@ -82,7 +82,7 @@ This loads the module (disabled), installs `kblockerctl`, enables the scheduler 
 sudo kblockerctl add-pgp sam.pub
 ```
 
-No PGP key handy? Run `sudo kblockerctl web-pages lan` and send them `http://<your-machine>:8737/keys`: they create a key in their browser and it registers itself. The private key never leaves their browser.
+No PGP key handy? Run `sudo kblockerctl web-pages lan` and send them `https://<your-machine>:8737/keys`: they accept the one-time certificate warning, create a key in their browser and it registers itself. The private key never leaves their browser.
 
 **3. Block for an hour**
 
@@ -97,7 +97,7 @@ sudo kblockerctl status
 sudo kblockerctl unblock      # asks for the key they decrypted for you
 ```
 
-Or send them `http://<your-machine>:8737/unblock` and they can decrypt it in their browser. Either way, the block also ends by itself when the time is up.
+Or send them `https://<your-machine>:8737/unblock` and they can decrypt it in their browser. Either way, the block also ends by itself when the time is up.
 
 > 💡 **Just want to look around?** `cd gui && pnpm install && pnpm dev` runs the desktop app's UI in a browser with demo data, no kernel module needed.
 
@@ -128,6 +128,7 @@ Or send them `http://<your-machine>:8737/unblock` and they can decrypt it in the
 - The scheduler service hosts `/keys` (create and register a key) and `/unblock` (decrypt the unload key) on port 8737.
 - Choose who can reach them: `off`, `local`, `lan` or `custom --bind <ip>` (a VPN address, say).
 - OpenPGP.js is built into `kblockerctl`, not loaded from a CDN, and the pages only accept same-origin requests.
+- Shared beyond this computer, the pages are served over https with a self-signed certificate (browsers only allow the in-browser encryption on https or localhost). Each device warns once; accept it to continue.
 
 ### 🖥️ Desktop app
 
