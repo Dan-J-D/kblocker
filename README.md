@@ -127,6 +127,7 @@ Or send them `https://<your-machine>:8737/unblock` and they can decrypt it in th
 
 - The scheduler service hosts `/keys` (create and register a key) and `/unblock` (decrypt the unload key) on port 8737.
 - Choose who can reach them: `off`, `local`, `lan` or `custom --bind <ip>` (a VPN address, say).
+- They stay up while a key holder is viewing a page (it sends a heartbeat) and turn themselves off once nobody has for 5 minutes; turn them on again when needed.
 - OpenPGP.js is built into `kblockerctl`, not loaded from a CDN, and the pages only accept same-origin requests.
 - Shared beyond this computer, the pages are served over https with a self-signed certificate (browsers only allow the in-browser encryption on https or localhost). Each device warns once; accept it to continue.
 

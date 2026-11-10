@@ -1565,8 +1565,9 @@ func doWeb(args []string) {
 	if os.Geteuid() != 0 {
 		fmt.Println("  WARNING: Not root — PGP key writes will fail.")
 	}
+	fmt.Println("  " + idleNote)
 
-	log.Fatal(servePages(listener, "keys"))
+	stopPages(servePages(listener, "keys"))
 }
 
 func doUnblockWeb(args []string) {
@@ -1582,8 +1583,18 @@ func doUnblockWeb(args []string) {
 	if os.Geteuid() != 0 {
 		fmt.Println("  WARNING: Not root — unblock writes will fail.")
 	}
+	fmt.Println("  " + idleNote)
 
-	log.Fatal(servePages(listener, "unblock"))
+	stopPages(servePages(listener, "unblock"))
+}
+
+// stopPages ends add-pgp-web or unblock-web once servePages returns.
+func stopPages(err error) {
+	if errors.Is(err, errPagesIdle) {
+		fmt.Printf("Stopped: %v.\n", err)
+		return
+	}
+	log.Fatal(err)
 }
 
 // ---- Web server handlers ----
@@ -1687,7 +1698,7 @@ input:focus { outline: none; border-color: #58a6ff; }
 </div>
 
 <script src="/openpgp.min.js"></script>
-` + openpgpCheckJS + `
+` + openpgpCheckJS + heartbeatJS + `
 <script>
 let generatedPrivKey = '';
 let generatedPubKey = '';
@@ -2248,7 +2259,7 @@ xsBNBGQ..."></textarea>
 </div>
 
 <script src="/openpgp.min.js"></script>
-` + openpgpCheckJS + `
+` + openpgpCheckJS + heartbeatJS + `
 <script>
 function loadKeyFile(event) {
   var file = event.target.files[0];

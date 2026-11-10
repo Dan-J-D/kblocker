@@ -43,8 +43,9 @@ const (
 	sniffTimeout = 30 * time.Second
 )
 
-// servePages serves the key holder pages on ln until serving fails,
-// adding TLS on the same port when ln listens beyond loopback.
+// servePages serves the key holder pages on ln, adding TLS on the same
+// port when ln listens beyond loopback. It returns errPagesIdle once the
+// pages go webIdleTimeout without a visit, or the error that stopped them.
 func servePages(ln net.Listener, root string) error {
 	h := http.Handler(newWebMux(root))
 	if a, ok := ln.Addr().(*net.TCPAddr); ok && !a.IP.IsLoopback() {
@@ -63,7 +64,8 @@ func servePages(ln net.Listener, root string) error {
 		ln = newSniffListener(ln, &tls.Config{GetCertificate: cert.get, MinVersion: tls.VersionTLS12})
 		h = redirectToHTTPS(h)
 	}
-	return http.Serve(ln, withSameOrigin(h))
+	idle := newIdleWatch()
+	return idle.serve(ln, withSameOrigin(idle.track(h)), webIdleTimeout)
 }
 
 // pagesURL is the address the pages are reached on: https unless they

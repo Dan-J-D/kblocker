@@ -196,4 +196,7 @@
     warn about the page's self-signed certificate the first time; accepting it
     lets them continue.
   {/if}
+  {#if s?.scheduler_active && mode !== "off"}
+    They turn off by themselves once nobody has viewed them for 5 minutes.
+  {/if}
 </p>

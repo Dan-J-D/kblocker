@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -13,7 +14,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // The key-creation and unblock pages, served by add-pgp-web, unblock-web
@@ -46,6 +49,121 @@ function openpgpProblem() {
 
 const defaultWebAddr = "127.0.0.1:8737"
 
+// webIdleTimeout is how long the pages stay up with no page viewed, so pages
+// turned on for one unlock don't stay reachable indefinitely.
+const webIdleTimeout = 5 * time.Minute
+
+// heartbeatInterval is how often a page being viewed tells the server so;
+// well under webIdleTimeout so a slow network can't miss one.
+const heartbeatInterval = 30 * time.Second
+
+var (
+	errPagesIdle = fmt.Errorf("no page viewed for %d minutes", int(webIdleTimeout.Minutes()))
+	idleNote     = fmt.Sprintf("Turns off once no page has been viewed for %d minutes.", int(webIdleTimeout.Minutes()))
+)
+
+// heartbeatJS goes in both pages. While the page is being viewed (its tab
+// showing in the focused window) it posts to /api/heartbeat, which keeps
+// the pages up. A closed, background or locked tab, or one in a window
+// behind another app, stops, so the idle timer runs again. A failed beat
+// means the pages are gone (or the network is), and the page says so
+// rather than leaving the next click to fail with a bare "Load failed".
+// Coming back to the page beats at once, so that's noticed straight away.
+var heartbeatJS = fmt.Sprintf(`<script>
+(function () {
+  var notice = null;
+  function beat() {
+    if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
+    fetch('/api/heartbeat', { method: 'POST', cache: 'no-store' }).then(function () {
+      if (notice) { notice.remove(); notice = null; }
+    }, function () {
+      if (notice) return;
+      notice = document.createElement('div');
+      notice.className = 'error';
+      notice.textContent = "Can't reach kblocker. These pages turn off once nobody has viewed them for %d minutes. " +
+        'Ask for them to be turned on again, then reload this page.';
+      var c = document.querySelector('.container');
+      c.insertBefore(notice, c.firstChild);
+    });
+  }
+  setInterval(beat, %d);
+  document.addEventListener('visibilitychange', beat);
+  window.addEventListener('focus', beat);
+})();
+</script>`, int(webIdleTimeout.Minutes()), heartbeatInterval.Milliseconds())
+
+// idleWatch stops the pages once no request has come in for a while.
+type idleWatch struct {
+	start time.Time
+	last  atomic.Int64 // latest visit, as time since start (monotonic)
+	idled atomic.Bool
+}
+
+func newIdleWatch() *idleWatch { return &idleWatch{start: time.Now()} }
+
+// track counts requests through h as visits, heartbeats included, except
+// the status the keys page polls every few seconds whether or not it's on
+// screen, so a tab left in the background doesn't keep the pages up.
+func (w *idleWatch) track(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/status" {
+			w.last.Store(int64(time.Since(w.start)))
+		}
+		h.ServeHTTP(rw, r)
+	})
+}
+
+// serve serves h on ln and shuts it down once timeout passes without a
+// visit, returning errPagesIdle then.
+func (w *idleWatch) serve(ln net.Listener, h http.Handler, timeout time.Duration) error {
+	srv := &http.Server{Handler: h}
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTimer(timeout)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+			}
+			idle := time.Since(w.start) - time.Duration(w.last.Load())
+			if idle >= timeout {
+				w.idled.Store(true)
+				// Shutdown also closes kept-alive connections, which could
+				// otherwise go on making requests after the listener is gone
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if srv.Shutdown(ctx) != nil {
+					srv.Close()
+				}
+				return
+			}
+			t.Reset(timeout - idle)
+		}
+	}()
+	err := srv.Serve(ln)
+	// Serve returns once Shutdown closes the listener; wait for the rest
+	close(stop)
+	<-finished
+	if w.idled.Load() {
+		return errPagesIdle
+	}
+	return err
+}
+
+// handleHeartbeat answers heartbeatJS; idleWatch counts the request.
+func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // newWebMux serves both pages; root picks which one "/" shows.
 func newWebMux(root string) *http.ServeMux {
 	mux := http.NewServeMux()
@@ -77,6 +195,7 @@ func newWebMux(root string) *http.ServeMux {
 		w.Write(openpgpJS)
 	})
 	mux.HandleFunc("/api/status", handleAPISStatus)
+	mux.HandleFunc("/api/heartbeat", handleHeartbeat)
 	mux.HandleFunc("/api/keys", handleAddKeyOnly)
 	mux.HandleFunc("/api/ciphertext-by-key", handleAPICiphertextByKey)
 	mux.HandleFunc("/api/unblock", handleAPIUnblock)
@@ -123,9 +242,19 @@ func startDaemonWeb() {
 		return
 	}
 	log.Printf("key and unblock pages on %s/keys and %s/unblock", pagesURL(addr), pagesURL(addr))
+	log.Print(idleNote)
 	go func() {
-		if err := servePages(ln, ""); err != nil {
+		err := servePages(ln, "")
+		if !errors.Is(err, errPagesIdle) {
 			log.Printf("web server stopped: %v", err)
+			return
+		}
+		log.Printf("key holder pages turned off: %v", err)
+		// keep them off across restarts, unless web-pages just changed the setting
+		if currentWebAddr() == addr {
+			if err := saveWebAddr("off"); err != nil {
+				log.Printf("pages not saved as off: %v", err)
+			}
 		}
 	}()
 }
@@ -267,15 +396,8 @@ func doWebPages(args []string) {
 	}
 
 	requiresRoot()
-	if err := os.MkdirAll(filepath.Dir(webDropIn), 0755); err != nil {
-		log.Fatalf("Failed to create %s: %v", filepath.Dir(webDropIn), err)
-	}
-	conf := "# Written by kblockerctl web-pages\n[Service]\nEnvironment=KBLOCKER_WEB=" + addr + "\n"
-	if err := os.WriteFile(webDropIn, []byte(conf), 0644); err != nil {
-		log.Fatalf("Failed to write %s: %v", webDropIn, err)
-	}
-	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
-		log.Fatalf("systemctl daemon-reload failed: %v\n%s", err, out)
+	if err := saveWebAddr(addr); err != nil {
+		log.Fatalf("Failed to save the setting: %v", err)
 	}
 	// try-restart leaves a stopped service stopped; the setting applies when it starts
 	if out, err := exec.Command("systemctl", "try-restart", schedulerUnit).CombinedOutput(); err != nil {
@@ -287,11 +409,28 @@ func doWebPages(args []string) {
 		fmt.Println("Key holder pages turned off.")
 	case "local":
 		fmt.Printf("Key holder pages on http://%s (this computer only).\n", addr)
+		fmt.Println(idleNote)
 	case "lan":
 		fmt.Printf("Key holder pages on https://<this computer's IP>:%s for every device on your network.\n", port)
-		fmt.Println(selfSignedNote)
+		fmt.Println(selfSignedNote, idleNote)
 	default:
 		fmt.Printf("Key holder pages on %s.\n", pagesURL(addr))
-		fmt.Println(selfSignedNote)
+		fmt.Println(selfSignedNote, idleNote)
 	}
+}
+
+// saveWebAddr stores where the scheduler service hosts the pages, for its
+// next start.
+func saveWebAddr(addr string) error {
+	if err := os.MkdirAll(filepath.Dir(webDropIn), 0755); err != nil {
+		return err
+	}
+	conf := "# Written by kblockerctl web-pages\n[Service]\nEnvironment=KBLOCKER_WEB=" + addr + "\n"
+	if err := os.WriteFile(webDropIn, []byte(conf), 0644); err != nil {
+		return err
+	}
+	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

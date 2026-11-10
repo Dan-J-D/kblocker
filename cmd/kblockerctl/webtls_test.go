@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -191,6 +193,111 @@ func TestPagesURL(t *testing.T) {
 	} {
 		if got := pagesURL(addr); got != want {
 			t.Errorf("pagesURL(%q) = %q, want %q", addr, got, want)
+		}
+	}
+}
+
+func TestPagesStopAfterIdleTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "http://" + ln.Addr().String()
+	const timeout = 400 * time.Millisecond
+	idle := newIdleWatch()
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- idle.serve(ln, idle.track(http.NotFoundHandler()), timeout) }()
+
+	// read bodies to the end so the client keeps connections alive, as browsers do
+	client := &http.Client{Transport: &http.Transport{}}
+	get := func(path string) error {
+		resp, err := client.Get(base + path)
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+		return err
+	}
+	time.Sleep(250 * time.Millisecond)
+	if err := get("/unblock"); err != nil { // a visit restarts the clock
+		t.Fatal(err)
+	}
+	time.Sleep(250 * time.Millisecond)
+	if err := get("/api/status"); err != nil { // still up, and polling isn't a visit
+		t.Fatalf("pages stopped despite a visit %v ago: %v", 250*time.Millisecond, err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errPagesIdle) {
+			t.Fatalf("serve returned %v, want errPagesIdle", err)
+		}
+		// last visit at ~250ms, so not before ~650ms
+		if took := time.Since(start); took < 600*time.Millisecond {
+			t.Errorf("stopped after %v, before the timeout from the last visit", took)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("pages still up long after the idle timeout")
+	}
+	if err := get("/unblock"); err == nil {
+		t.Error("pages still answer after stopping, on a kept-alive connection")
+	}
+}
+
+func TestHeartbeatKeepsPagesUp(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "http://" + ln.Addr().String()
+	const timeout = 400 * time.Millisecond
+	idle := newIdleWatch()
+	done := make(chan error, 1)
+	go func() { done <- idle.serve(ln, withSameOrigin(idle.track(newWebMux("unblock"))), timeout) }()
+
+	beat := func() int {
+		resp, err := http.Post(base+"/api/heartbeat", "", nil)
+		if err != nil {
+			t.Fatalf("heartbeat: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	// an open page beating for well past the timeout keeps the pages up
+	for i := 0; i < 8; i++ {
+		if code := beat(); code != http.StatusNoContent {
+			t.Fatalf("heartbeat answered %d", code)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("pages stopped while a page was beating: %v", err)
+	default:
+	}
+
+	// once it stops, the pages turn off
+	stopped := time.Now()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errPagesIdle) {
+			t.Fatalf("serve returned %v, want errPagesIdle", err)
+		}
+		if took := time.Since(stopped); took < 150*time.Millisecond {
+			t.Errorf("stopped %v after the last heartbeat, before the timeout", took)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("pages still up long after heartbeats stopped")
+	}
+}
+
+func TestPagesIncludeHeartbeat(t *testing.T) {
+	for _, page := range []string{"/keys", "/unblock"} {
+		w := httptest.NewRecorder()
+		newWebMux("").ServeHTTP(w, httptest.NewRequest("GET", page, nil))
+		if body := w.Body.String(); !strings.Contains(body, "/api/heartbeat") || !strings.Contains(body, "setInterval(beat, 30000)") {
+			t.Errorf("%s doesn't send heartbeats", page)
 		}
 	}
 }

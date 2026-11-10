@@ -130,7 +130,15 @@ self-signed and kept in `/var/lib/kblocker/web-cert.pem` (key in `web-key.pem`),
 device warns about it the first time; accepting it lets them continue. It's renewed a
 month before it expires, or when this computer gets a new address. Its SHA-256
 fingerprint is in the service log (`journalctl -u kblocker-scheduler | grep certificate`)
-for comparing with what a browser shows. Add `--port <port>`
+for comparing with what a browser shows.
+
+The pages turn themselves off once nobody has viewed them for 5 minutes. A page sends a
+heartbeat every 30 seconds while it's being viewed (its tab showing in the focused
+window); a closed, background or locked tab, or one whose window is behind another app,
+doesn't, and neither does the keys page's background status check. If a heartbeat
+fails, the page says the pages can't be reached instead of failing on the next click.
+When they turn off, the setting is saved as `off` so they stay off after a restart. Turn them on again with `web-pages` or in the app when a
+key holder needs them. `add-pgp-web` and `unblock-web` stop the same way. Add `--port <port>`
 to any of them to move the pages; otherwise the port is kept. The setting is saved in
 a drop-in for the service, and `add-pgp-web` / `unblock-web` use the same address by
 default. All of it is also on the desktop app's Key holders and System pages. The pages
